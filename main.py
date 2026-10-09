@@ -129,8 +129,43 @@ class PersonaStudioPlugin(Star):
                         arguments = command[1] if len(command) == 2 else ""
                         break
         parts = arguments.split(maxsplit=1)
+        if len(parts) == 2 and parts[0] == "whitelist":
+            whitelist_parts = parts[1].split()
+            if len(whitelist_parts) != 2 or whitelist_parts[0] not in {"add", "remove"}:
+                yield event.plain_result(
+                    "用法：/ps whitelist add <用户ID> 或 /ps whitelist remove <用户ID>"
+                )
+                return
+            response = json.loads(
+                await self.dispatch(
+                    event,
+                    "whitelist",
+                    whitelist_parts[0],
+                    {"user_id": whitelist_parts[1]},
+                )
+            )
+            if not response["ok"]:
+                yield event.plain_result(
+                    f"{response['error']['code']}：{response['error']['message']}"
+                )
+                return
+            data = response["data"]
+            if not data["changed"]:
+                state = "已在白名单中" if data["whitelisted"] else "不在白名单中"
+                yield event.plain_result(
+                    f"用户 {data['user_id']} {state}（平台实例：{data['platform_id']}）。"
+                )
+                return
+            state = "加入" if data["whitelisted"] else "移出"
+            yield event.plain_result(
+                f"已将用户 {data['user_id']} {state}白名单并保存（平台实例：{data['platform_id']}）。"
+            )
+            return
         if len(parts) != 2 or parts[0] not in {"lock", "unlock"}:
-            yield event.plain_result("用法：/ps lock <人格ID> 或 /ps unlock <人格ID>")
+            yield event.plain_result(
+                "用法：/ps lock <人格ID>、/ps unlock <人格ID>；"
+                "管理员可用 /ps whitelist add <用户ID>、/ps whitelist remove <用户ID>。"
+            )
             return
         response = json.loads(
             await self.dispatch(event, "protect", parts[0], {"persona_id": parts[1]})

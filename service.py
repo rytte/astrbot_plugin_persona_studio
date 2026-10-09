@@ -224,13 +224,18 @@ class PersonaStudio:
         try:
             settings = self.settings()
             actor = identify(event, settings)
-            if family not in {"manage", "versions", "protect"} or not isinstance(
-                action, str
-            ):
+            if family not in {
+                "manage",
+                "versions",
+                "protect",
+                "whitelist",
+            } or not isinstance(action, str):
                 raise StudioError("invalid_action", "无效操作。")
             if not isinstance(payload, dict):
                 raise StudioError("invalid_payload", "payload 必须是 JSON 对象。")
-            target = payload.get("persona_id", payload.get("backup_id"))
+            target = payload.get(
+                "persona_id", payload.get("backup_id", payload.get("user_id"))
+            )
             async with self.lock:
                 settings = self.settings()
                 actor = identify(event, settings)
@@ -242,8 +247,12 @@ class PersonaStudio:
                     result = await self.versions(
                         event, actor, action, payload, settings, progress
                     )
-                else:
+                elif family == "protect":
                     result = await self.protect(
+                        event, actor, action, payload, settings, progress
+                    )
+                else:
+                    result = await self.whitelist(
                         event, actor, action, payload, settings, progress
                     )
                 self.storage.audit(
@@ -251,7 +260,9 @@ class PersonaStudio:
                     f"{family}.{action}",
                     target,
                     "success",
-                    changed_fields=set(payload) & CONTENT_FIELDS,
+                    changed_fields=({"whitelist"} if result["changed"] else set())
+                    if family == "whitelist"
+                    else set(payload) & CONTENT_FIELDS,
                 )
                 return {"ok": True, "data": result}
         except Exception as exc:
@@ -635,6 +646,80 @@ class PersonaStudio:
             "backup_id": progress.get("backup_id"),
             "owner": record["owner"],
             **self.state(record, restored),
+        }
+
+    async def whitelist(
+        self,
+        event,
+        actor,
+        action: str,
+        payload: dict,
+        settings: Settings,
+        progress: dict,
+    ) -> dict:
+        if not actor.admin:
+            raise StudioError("admin_only", "仅管理员可以添加或移除白名单用户。")
+        if action not in {"add", "remove"}:
+            raise StudioError("invalid_action", "白名单命令仅支持 add/remove。")
+        check_payload(payload, {"user_id"}, {"user_id"})
+        user_id = payload["user_id"]
+        if (
+            not isinstance(user_id, str)
+            or not user_id
+            or any(character.isspace() for character in user_id)
+        ):
+            raise StudioError(
+                "invalid_payload", "用户 ID 必须为非空字符串，不能包含空白。"
+            )
+        original = event.message_obj.message_str.strip()
+        prefixes = self.context.get_config(event.unified_msg_origin).get(
+            "wake_prefix", ["/"]
+        )
+        if event.message_obj.raw_message is None or not any(
+            original.startswith(prefix)
+            and original[len(prefix) :].split() == ["ps", "whitelist", action, user_id]
+            for prefix in prefixes
+        ):
+            raise StudioError(
+                "real_command_only",
+                "白名单变更只接受管理员直接发送的命令，模型及命令代理不能执行。",
+            )
+        identity = (actor.platform_id, user_id)
+        whitelisted = action == "add"
+        changed = (identity in settings.whitelist) != whitelisted
+        if changed:
+            entries = list(self.config.get("whitelist", []))
+            if whitelisted:
+                entries.append(
+                    {
+                        "__template_key": "user",
+                        "platform_id": actor.platform_id,
+                        "user_id": user_id,
+                    }
+                )
+            else:
+                entries = [
+                    entry
+                    for entry in entries
+                    if (entry["platform_id"], entry["user_id"]) != identity
+                ]
+            previous = dict(self.config)
+            progress["mutation_started"] = True
+            try:
+                self.config.save_config({"whitelist": entries})
+            except Exception as exc:
+                self.config.clear()
+                self.config.update(previous)
+                raise StudioError(
+                    "config_save_failed",
+                    "保存白名单失败，本次修改未生效；请检查配置文件权限，不要自动重试。",
+                ) from exc
+            progress["plugin_written"] = True
+        return {
+            "platform_id": actor.platform_id,
+            "user_id": user_id,
+            "whitelisted": whitelisted,
+            "changed": changed,
         }
 
     async def protect(

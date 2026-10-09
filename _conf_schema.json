@@ -3,7 +3,7 @@
     "description": "人格管理白名单",
     "type": "template_list",
     "default": [],
-    "hint": "用户只能管理自己通过本插件新建的人格。移出白名单立即撤销权限，管理员不需要加入。",
+    "hint": "用户只能管理自己通过本插件新建的人格。管理员可私聊使用 /ps whitelist add/remove <用户ID> 维护当前平台实例的白名单。移出白名单立即撤销权限，管理员不需要加入。",
     "templates": {
       "user": {
         "name": "授权用户",
