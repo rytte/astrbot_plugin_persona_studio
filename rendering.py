@@ -20,10 +20,13 @@ async ({height, maxPages}) => {
     await document.fonts.ready;
     const source = document.querySelector('[data-sheet="content"]');
     const flow = source.querySelector('.flow');
+    const availableHeight = () => Math.floor(height - (source.getBoundingClientRect().height - flow.getBoundingClientRect().height));
+    const firstCapacity = availableHeight();
+    source.classList.add('continuation');
+    const continuationCapacity = availableHeight();
+    source.classList.remove('continuation');
     const bounds = flow.getBoundingClientRect();
-    const frameHeight = source.getBoundingClientRect().height - bounds.height;
-    const capacity = Math.floor(height - frameHeight);
-    if (capacity <= 0) return {error: '页面标题与边距超过分页高度，请增加分页高度。'};
+    if (firstCapacity <= 0 || continuationCapacity <= 0) return {error: '页面标题与边距超过分页高度，请增加分页高度。'};
     const protectedRanges = [];
     for (const element of flow.querySelectorAll('[data-text]')) {
         const range = document.createRange();
@@ -49,6 +52,7 @@ async ({height, maxPages}) => {
     const totalHeight = Math.ceil(bounds.height);
     let start = 0;
     while (start < totalHeight) {
+        const capacity = spans.length === 0 ? firstCapacity : continuationCapacity;
         let end = Math.min(start + capacity, totalHeight);
         if (end < totalHeight) {
             while (true) {
@@ -64,6 +68,10 @@ async ({height, maxPages}) => {
     }
     const sheets = spans.map((span, index) => {
         const sheet = source.cloneNode(true);
+        if (index > 0) {
+            sheet.classList.add('continuation');
+            sheet.querySelector('.persona-header').remove();
+        }
         sheet.querySelector('.flow-window').style.height = (span.end - span.start) + 'px';
         sheet.querySelector('.flow').style.transform = 'translateY(-' + span.start + 'px)';
         sheet.querySelector('[data-page-number]').textContent = '正文 · ' + (index + 1) + ' / ' + spans.length;

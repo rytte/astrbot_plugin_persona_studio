@@ -340,7 +340,10 @@ async def test_revocation_while_rendering_does_not_return_raw_data(created):
     created.event.send.assert_not_called()
 
 
-async def test_real_browser_renders_long_offline_content(created, tmp_path):
+@pytest.mark.parametrize("page_height", [1001, 1500])
+async def test_real_browser_renders_long_offline_content(
+    created, tmp_path, page_height
+):
     from astrbot_plugin_browser.service import BrowserService, find_system_chromium
     from PIL import Image
 
@@ -380,13 +383,16 @@ async def test_real_browser_renders_long_offline_content(created, tmp_path):
         )
         response["data"]["persona"]["system_prompt"] = prompt
         async with service.session(
-            viewport={"width": 1000, "height": 1500}, javascript_enabled=False
+            viewport={"width": 1000, "height": page_height}, javascript_enabled=False
         ) as page:
             await page.set_content(rendering.content_html(response["data"], 1000))
             layout = await page.evaluate(
-                rendering.PAGINATE_CONTENT, {"height": 1500, "maxPages": 19}
+                rendering.PAGINATE_CONTENT, {"height": page_height, "maxPages": 19}
             )
             assert "error" not in layout and len(layout["pages"]) > 1
+            assert all(
+                0 < bounds["height"] <= page_height for bounds in layout["pages"]
+            )
             inspected = await page.evaluate("""() => {
                 const sheets = [...document.querySelectorAll('[data-sheet="content"]')];
                 let broken = 0;
@@ -400,9 +406,40 @@ async def test_real_browser_renders_long_offline_content(created, tmp_path):
                         }
                     }
                 }
-                return {broken, prompt: sheets[0].querySelector('[data-text]').textContent};
+                return {
+                    broken,
+                    prompt: sheets[0].querySelector('[data-text]').textContent,
+                    pages: sheets.map(sheet => ({
+                        hasHeader: Boolean(sheet.querySelector('.persona-header')),
+                        hasTitle: Boolean(sheet.querySelector('h1')),
+                        hasMetadata: Boolean(sheet.querySelector('.hero-meta')),
+                        continuation: sheet.classList.contains('continuation'),
+                        hintVisible: sheet.querySelector('.continuation-header').getBoundingClientRect().height > 0,
+                        contentHeight: sheet.querySelector('.flow-window').getBoundingClientRect().height,
+                        pageNumber: sheet.querySelector('[data-page-number]').textContent
+                    }))
+                };
             }""")
             assert inspected["broken"] == 0
             assert inspected["prompt"] == prompt
+            first_page = inspected["pages"][0]
+            assert first_page["hasHeader"] and first_page["hasTitle"]
+            assert first_page["hasMetadata"]
+            assert not first_page["continuation"] and not first_page["hintVisible"]
+            for index, subsequent_page in enumerate(inspected["pages"][1:], start=2):
+                assert not subsequent_page["hasHeader"]
+                assert not subsequent_page["hasTitle"]
+                assert not subsequent_page["hasMetadata"]
+                assert (
+                    subsequent_page["continuation"] and subsequent_page["hintVisible"]
+                )
+                assert (
+                    subsequent_page["pageNumber"]
+                    == f"正文 · {index} / {len(layout['pages'])}"
+                )
+            assert (
+                inspected["pages"][1]["contentHeight"]
+                > first_page["contentHeight"] + 100
+            )
     finally:
         await service.close()

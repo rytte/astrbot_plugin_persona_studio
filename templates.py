@@ -9,6 +9,11 @@ PAGE_CSS = """
 html,body{margin:0;padding:0;background:#f4f3f9;color:#283047;}
 body{font-family:"Microsoft YaHei UI","Microsoft YaHei","PingFang SC","Noto Sans CJK SC","WenQuanYi Micro Hei",sans-serif;}
 .sheet{width:100%;padding:36px;background:linear-gradient(135deg,#f0edf9 0%,#f7f7fb 45%,#eef4f7 100%);}
+.sheet.continuation{padding-top:24px;padding-bottom:24px;}
+.continuation .persona-header{display:none;}
+.continuation-header{display:none;align-items:center;gap:14px;margin-bottom:18px;font-size:13px;line-height:20px;color:#9a90ac;}
+.continuation .continuation-header{display:flex;}
+.continuation-header::after{content:"";height:1px;flex:1;background:#e2ddeb;}
 .masthead{display:flex;align-items:center;gap:12px;margin-bottom:24px;}
 .brand-mark{display:grid;place-items:center;width:42px;height:42px;border-radius:13px;background:#7561b9;color:white;font-size:17px;font-weight:700;letter-spacing:1px;}
 .brand-name{font-size:17px;font-weight:700;color:#4d436b;}
@@ -98,7 +103,7 @@ def header_html(result: dict, kind: str) -> str:
     version = f"{'历史快照' if snapshot else '当前版本'} · {revision}"
     locked = result.get("locked", False)
     return (
-        '<header><div class="masthead"><span class="brand-mark">PS</span>'
+        '<header class="persona-header"><div class="masthead"><span class="brand-mark">PS</span>'
         '<div><div class="brand-name">人格捏造</div>'
         '<div class="brand-subtitle">PERSONA STUDIO</div></div></div>'
         f'<div class="hero"><div class="eyebrow">{kind}</div><h1>{persona_id}</h1>'
@@ -245,6 +250,7 @@ def content_html(result: dict, width: int) -> str:
     body = (
         '<main class="sheet" data-sheet="content">'
         + header_html(result, "人格正文")
+        + '<header class="continuation-header"><span>接上页</span></header>'
         + '<div class="content-card"><div class="flow-window"><div class="flow">'
         + "".join(sections)
         + "</div></div></div>"
