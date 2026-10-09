@@ -1,0 +1,85 @@
+{
+  "whitelist": {
+    "description": "人格管理白名单",
+    "type": "template_list",
+    "default": [],
+    "hint": "用户只能管理自己通过本插件新建的人格。移出白名单立即撤销权限，管理员不需要加入。",
+    "templates": {
+      "user": {
+        "name": "授权用户",
+        "items": {
+          "platform_id": {
+            "description": "平台实例 ID",
+            "type": "string",
+            "default": ""
+          },
+          "user_id": {
+            "description": "用户 ID",
+            "type": "string",
+            "default": ""
+          }
+        }
+      }
+    }
+  },
+  "max_personas_per_user": {
+    "description": "白名单用户人格数量上限",
+    "type": "int",
+    "default": 20
+  },
+  "max_personas_total": {
+    "description": "全局人格数量上限（包含 WebUI 创建）",
+    "type": "int",
+    "default": 200
+  },
+  "max_prompt_chars": {
+    "description": "系统提示词字符上限",
+    "type": "int",
+    "default": 50000
+  },
+  "max_dialog_chars": {
+    "description": "预设对话总字符上限",
+    "type": "int",
+    "default": 50000
+  },
+  "max_error_chars": {
+    "description": "自定义错误回复字符上限",
+    "type": "int",
+    "default": 5000
+  },
+  "backup_keep_count": {
+    "description": "每条人格版本链最多保留备份数",
+    "type": "int",
+    "default": 50
+  },
+  "backup_keep_days": {
+    "description": "备份保留天数",
+    "type": "int",
+    "default": 90
+  },
+  "render_width": {
+    "description": "详情图片宽度",
+    "type": "int",
+    "default": 1000
+  },
+  "render_page_height": {
+    "description": "详情图片分页高度（30 的倍数）",
+    "type": "int",
+    "default": 1500
+  },
+  "render_max_pages": {
+    "description": "详情图片总页数上限",
+    "type": "int",
+    "default": 20
+  },
+  "render_max_pixels": {
+    "description": "单页像素面积上限",
+    "type": "int",
+    "default": 2000000
+  },
+  "render_timeout": {
+    "description": "详情渲染总超时（秒）",
+    "type": "int",
+    "default": 30
+  }
+}

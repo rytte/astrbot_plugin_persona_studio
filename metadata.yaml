@@ -1,0 +1,6 @@
+name: astrbot_plugin_persona_studio
+display_name: 人格捏造
+desc: 通过模型捏造、编辑、切换人格，支持白名单、人工锁定、历史版本和图片展示。
+version: 0.1.0
+author: rytte
+astrbot_version: ">=4.27,<5"
