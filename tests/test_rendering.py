@@ -57,6 +57,35 @@ async def detail(env):
     return response
 
 
+@pytest.mark.parametrize(
+    "persona_id, expected",
+    [
+        ("澪", "人格_澪_当前_v3.md"),
+        ("Mio 春日", "人格_Mio 春日_当前_v3.md"),
+        (
+            '澪/测试\\副本:一?二*三"四<五>六|七',
+            "人格_澪_测试_副本_一_二_三_四_五_六_七_当前_v3.md",
+        ),
+        ("澪\x00测试\n副本\x7f", "人格_澪_测试_副本__当前_v3.md"),
+        ("CON", "人格_CON_当前_v3.md"),
+        ("...", "人格_未命名_当前_v3.md"),
+        ("澪\u202e.md", "人格_澪_.md_当前_v3.md"),
+    ],
+)
+def test_markdown_filename_is_readable_and_safe(persona_id, expected):
+    result = {"persona": {"persona_id": persona_id}, "revision": 3}
+    assert rendering.markdown_filename(result) == expected
+
+
+@pytest.mark.parametrize("persona_id", ["澪" * 255, "A" * 255, "澪😊" * 100])
+def test_markdown_filename_limits_bytes_without_breaking_unicode(persona_id):
+    result = {"persona": {"persona_id": persona_id}, "revision": 3}
+    name = rendering.markdown_filename(result)
+    assert len(name.encode("utf-8")) <= 200
+    assert name.startswith("人格_") and name.endswith("_当前_v3.md")
+    assert "\ufffd" not in name
+
+
 def test_html_escapes_content_and_md_keeps_it():
     result = {
         "persona": {
@@ -139,10 +168,12 @@ async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
     page, calls = fake_browser(created)
     monkeypatch.setattr(rendering, "get_astrbot_temp_path", lambda: str(tmp_path))
     captured = []
+    captured_names = []
 
     async def send(message):
         component = message.chain[0]
         if component.type.value == "File":
+            captured_names.append(component.name)
             path = await component.get_file()
             captured.append(
                 await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
@@ -155,6 +186,7 @@ async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
     assert response["ok"], response
     assert response["delivery"]["images_submitted"] == 3
     assert response["delivery"]["md_submitted"]
+    assert captured_names == ["人格_alice_当前_v1.md"]
     assert captured and "版本1" in captured[0]
     assert not list(tmp_path.rglob("*.md"))
     assert calls[0]["javascript_enabled"] is False
@@ -162,6 +194,37 @@ async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
     assert page.screenshot.call_args_list[2].kwargs["clip"]["y"] == 1500
     assert 'data-sheet="overview"' in page.set_content.call_args_list[0].args[0]
     assert 'data-sheet="content"' in page.set_content.call_args_list[1].args[0]
+
+
+async def test_historical_md_filename_uses_snapshot_revision(
+    created, tmp_path, monkeypatch
+):
+    updated = await created.studio.execute(
+        created.event,
+        "manage",
+        "update",
+        {"persona_id": "alice", "system_prompt": "版本2"},
+    )
+    assert updated["ok"], updated
+    response = await created.studio.execute(
+        created.event,
+        "versions",
+        "get",
+        {"backup_id": updated["data"]["backup_id"]},
+    )
+    assert response["ok"], response
+    assert response["data"]["revision"] == 2
+    assert response["data"]["snapshot"]["revision"] == 1
+    fake_browser(created, height=450)
+    monkeypatch.setattr(rendering, "get_astrbot_temp_path", lambda: str(tmp_path))
+    response = await rendering.present(
+        created.studio, created.event, response, include_md=True
+    )
+    assert response["ok"] and response["delivery"]["md_submitted"]
+    file = created.event.send.await_args_list[-1].args[0].chain[0]
+    assert file.type.value == "File"
+    assert file.name == "人格_alice_历史_v1.md"
+    assert not list(tmp_path.rglob("*.md"))
 
 
 @pytest.mark.parametrize("family", ["manage", "versions"])

@@ -5,13 +5,14 @@ import json
 import math
 import re
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import File, Image
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
-from .domain import StudioError, digest, identify
+from .domain import StudioError, identify
 from .templates import content_html, overview_html
 
 PAGINATE_CONTENT = r"""
@@ -78,6 +79,26 @@ async ({height, maxPages}) => {
     };
 }
 """
+
+
+def markdown_filename(result: dict) -> str:
+    snapshot = result.get("snapshot")
+    revision = snapshot["revision"] if snapshot else result["revision"]
+    kind = "历史" if snapshot else "当前"
+    prefix = "人格_"
+    suffix = f"_{kind}_v{revision}.md"
+    name = "".join(
+        "_"
+        if character in '<>:"/\\|?*'
+        or unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+        else character
+        for character in result["persona"]["persona_id"]
+    )
+    byte_limit = 200 - len((prefix + suffix).encode("utf-8"))
+    name = (
+        name.encode("utf-8")[:byte_limit].decode("utf-8", errors="ignore").strip(" .")
+    )
+    return f"{prefix}{name or '未命名'}{suffix}"
 
 
 def detail_markdown(result: dict) -> str:
@@ -252,7 +273,7 @@ async def present(studio, event, response: dict, *, include_md: bool) -> dict:
                 stream.write(detail_markdown(result))
         messages = [MessageChain([Image.fromBytes(image)]) for image in images]
         if path is not None:
-            name = f"persona_{digest(result['persona']['persona_id'])[:12]}.md"
+            name = markdown_filename(result)
             messages.append(MessageChain([File(name=name, file=str(path))]))
         for index, message in enumerate(messages):
             delivery_actor(studio, event, result)
