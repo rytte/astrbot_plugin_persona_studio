@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import math
 import re
@@ -13,68 +12,72 @@ from astrbot.api.message_components import File, Image
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .domain import StudioError, digest, identify
+from .templates import content_html, overview_html
 
-
-def detail_text(result: dict) -> str:
-    persona = result["persona"]
-    metadata = {
-        name: value
-        for name, value in result.items()
-        if name not in {"persona", "snapshot", "expected_revision", "chain_id"}
-    }
-    fields = {
-        name: value
-        for name, value in persona.items()
-        if name not in {"system_prompt", "begin_dialogs", "custom_error_message"}
-    }
-    lines = [
-        "人格捏造 · 人格详情",
-        "",
-        "【版本与权限】",
-        json.dumps(metadata, ensure_ascii=False),
-        "",
-        "【人格元信息与能力】",
-        json.dumps(fields, ensure_ascii=False, indent=2),
-        "",
-        "【系统提示词】",
-        persona["system_prompt"],
-        "",
-        "【预设对话】",
-    ]
-    for index, dialog in enumerate(persona.get("begin_dialogs") or []):
-        lines.extend(
-            [f"{index + 1}. {'用户' if index % 2 == 0 else '助手'}", dialog, ""]
-        )
-    lines.extend(
-        [
-            "【自定义错误回复】",
-            persona.get("custom_error_message")
-            if persona.get("custom_error_message") is not None
-            else "null",
-        ]
-    )
-    if "snapshot" in result:
-        snapshot = {
-            name: value
-            for name, value in result["snapshot"].items()
-            if name != "persona"
+PAGINATE_CONTENT = r"""
+async ({height, maxPages}) => {
+    await document.fonts.ready;
+    const source = document.querySelector('[data-sheet="content"]');
+    const flow = source.querySelector('.flow');
+    const bounds = flow.getBoundingClientRect();
+    const frameHeight = source.getBoundingClientRect().height - bounds.height;
+    const capacity = Math.floor(height - frameHeight);
+    if (capacity <= 0) return {error: '页面标题与边距超过分页高度，请增加分页高度。'};
+    const protectedRanges = [];
+    for (const element of flow.querySelectorAll('[data-text]')) {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        for (const rect of range.getClientRects()) {
+            if (rect.height > 0) protectedRanges.push({top: rect.top - bounds.top, bottom: rect.bottom - bounds.top, width: rect.width});
         }
-        lines.extend(["", "【备份元信息】", json.dumps(snapshot, ensure_ascii=False)])
-    return "\n".join(lines)
-
-
-def detail_html(result: dict, width: int) -> str:
-    content = html.escape(detail_text(result), quote=True)
-    return (
-        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">"
-        "<style>html,body{margin:0;background:#f5f2ec;color:#20252c;}"
-        f"body{{width:{width}px;}}"
-        "pre{box-sizing:border-box;margin:0;padding:30px;white-space:pre-wrap;"
-        "overflow-wrap:anywhere;word-break:break-word;font-size:20px;line-height:30px;"
-        'font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;}'
-        "</style></head><body><pre>" + content + "</pre></body></html>"
-    )
+    }
+    for (const heading of flow.querySelectorAll('[data-heading]')) {
+        const title = heading.getBoundingClientRect();
+        const text = heading.parentElement.querySelector('[data-text]');
+        const range = document.createRange();
+        if (text) range.selectNodeContents(text);
+        const firstLine = text ? range.getClientRects()[0] : null;
+        protectedRanges.push({top: title.top - bounds.top, bottom: Math.max(title.bottom, firstLine ? firstLine.bottom : title.bottom) - bounds.top});
+    }
+    for (const heading of flow.querySelectorAll('[data-prompt-heading]')) {
+        const title = heading.getBoundingClientRect();
+        const following = protectedRanges.filter(rect => rect.width > 0 && rect.top >= title.bottom - bounds.top - 1).sort((first, second) => first.top - second.top)[0];
+        protectedRanges.push({top: title.top - bounds.top, bottom: Math.max(title.bottom - bounds.top, following ? following.bottom : 0)});
+    }
+    const spans = [];
+    const totalHeight = Math.ceil(bounds.height);
+    let start = 0;
+    while (start < totalHeight) {
+        let end = Math.min(start + capacity, totalHeight);
+        if (end < totalHeight) {
+            while (true) {
+                const crossing = protectedRanges.filter(rect => rect.top < end && rect.bottom > end);
+                if (!crossing.length) break;
+                end = Math.floor(Math.min(...crossing.map(rect => rect.top)));
+                if (end <= start) return {error: '页面空间不足以完整显示文字行，请增加分页高度。'};
+            }
+        }
+        spans.push({start, end});
+        if (spans.length > maxPages) return {error: '正文页数超过上限；未发送截断图片。'};
+        start = end;
+    }
+    const sheets = spans.map((span, index) => {
+        const sheet = source.cloneNode(true);
+        sheet.querySelector('.flow-window').style.height = (span.end - span.start) + 'px';
+        sheet.querySelector('.flow').style.transform = 'translateY(-' + span.start + 'px)';
+        sheet.querySelector('[data-page-number]').textContent = '正文 · ' + (index + 1) + ' / ' + spans.length;
+        return sheet;
+    });
+    document.body.replaceChildren(...sheets);
+    return {
+        width: document.documentElement.scrollWidth,
+        pages: sheets.map(sheet => {
+            const rect = sheet.getBoundingClientRect();
+            return {top: rect.top, height: Math.ceil(rect.height)};
+        })
+    };
+}
+"""
 
 
 def detail_markdown(result: dict) -> str:
@@ -115,34 +118,75 @@ async def render_pages(context, result: dict, settings) -> list[bytes]:
             timeout=settings.render_timeout,
         ) as page:
             await page.set_content(
-                detail_html(result, settings.render_width), wait_until="load"
+                overview_html(result, settings.render_width), wait_until="load"
             )
-            dimensions = await page.evaluate(
-                "() => ({width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight})"
+            overview = await page.evaluate(
+                "async () => { await document.fonts.ready; return {width: document.documentElement.scrollWidth, height: Math.ceil(document.querySelector('.sheet').getBoundingClientRect().height)}; }"
             )
-            width, height = dimensions["width"], dimensions["height"]
+            width, height = overview["width"], overview["height"]
             if (
                 not isinstance(width, int | float)
                 or not isinstance(height, int | float)
                 or not math.isfinite(width)
                 or not math.isfinite(height)
                 or width > settings.render_width
+                or width <= 0
                 or height <= 0
+                or settings.render_width * height > settings.render_max_pixels
             ):
                 raise StudioError(
-                    "render_limit", "渲染尺寸无效或存在横向溢出，不截断内容。"
-                )
-            total = math.ceil(height / settings.render_page_height)
-            if total > settings.render_max_pages:
-                raise StudioError(
                     "render_limit",
-                    f"完整详情需要 {total} 页，超过上限 {settings.render_max_pages}；未发送截断图片。",
+                    "人格档案尺寸无效或超出单图像素上限；档案不拆页、不截断。",
                 )
-            for index in range(total):
-                top = index * settings.render_page_height
-                page_height = min(settings.render_page_height, height - top)
-                if width * page_height > settings.render_max_pixels:
-                    raise StudioError("render_limit", "渲染单页超过像素上限。")
+            image = await page.screenshot(
+                type="png",
+                animations="disabled",
+                full_page=True,
+                clip={"x": 0, "y": 0, "width": settings.render_width, "height": height},
+                timeout=settings.render_timeout * 1000,
+            )
+            if not isinstance(image, bytes) or not image.startswith(
+                b"\x89PNG\r\n\x1a\n"
+            ):
+                raise StudioError("render_failed", "浏览器没有返回有效 PNG。")
+            images.append(image)
+            await page.set_content(
+                content_html(result, settings.render_width), wait_until="load"
+            )
+            layout = await page.evaluate(
+                PAGINATE_CONTENT,
+                {
+                    "height": settings.render_page_height,
+                    "maxPages": settings.render_max_pages - 1,
+                },
+            )
+            if "error" in layout:
+                raise StudioError("render_limit", layout["error"])
+            width, pages = layout["width"], layout["pages"]
+            if (
+                not isinstance(width, int | float)
+                or not math.isfinite(width)
+                or not 0 < width <= settings.render_width
+                or not pages
+                or len(pages) + 1 > settings.render_max_pages
+            ):
+                raise StudioError(
+                    "render_limit", "正文尺寸或总页数超出上限，不截断内容。"
+                )
+            for bounds in pages:
+                top, page_height = bounds["top"], bounds["height"]
+                if (
+                    not isinstance(top, int | float)
+                    or not isinstance(page_height, int | float)
+                    or not math.isfinite(top)
+                    or not math.isfinite(page_height)
+                    or top < 0
+                    or not 0 < page_height <= settings.render_page_height
+                    or settings.render_width * page_height > settings.render_max_pixels
+                ):
+                    raise StudioError(
+                        "render_limit", "正文分页尺寸无效或超过像素上限。"
+                    )
                 image = await page.screenshot(
                     type="png",
                     animations="disabled",

@@ -111,11 +111,6 @@ class Settings:
             raise StudioError(
                 "invalid_config", "渲染宽度需为 480～1600，高度需为 600～2400。"
             )
-        if settings.render_page_height % 30:
-            raise StudioError(
-                "invalid_config",
-                "render_page_height 必须为 30 的倍数，避免分页切断文字行。",
-            )
         if (
             settings.render_width * settings.render_page_height
             > settings.render_max_pixels

@@ -461,7 +461,7 @@ async def test_audit_has_no_prompt(created):
         {"old_whitelist": []},
         {"whitelist": ["user"]},
         {"render_width": 0},
-        {"render_page_height": 1001},
+        {"render_page_height": 599},
         {"whitelist": [{"platform_id": "p", "user_id": "u", "__template_key": "old"}]},
     ],
 )

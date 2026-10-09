@@ -1,21 +1,38 @@
 import asyncio
+import html
 import io
+import json
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from astrbot.api.message_components import Image
 from astrbot_plugin_persona_studio import rendering
 from astrbot_plugin_persona_studio.domain import Settings, StudioError
+from astrbot_plugin_persona_studio.main import PersonaStudioPlugin
+from astrbot_plugin_persona_studio.templates import format_time, prompt_html
 
 PNG = b"\x89PNG\r\n\x1a\nimage"
 
 
-def fake_browser(env, *, height=3000, ready=True):
+def fake_browser(env, *, height=3000, overview_height=1200, ready=True):
     page = SimpleNamespace(
         set_content=AsyncMock(),
-        evaluate=AsyncMock(return_value={"width": 1000, "height": height}),
+        evaluate=AsyncMock(
+            side_effect=[
+                {"width": 1000, "height": overview_height},
+                {
+                    "width": 1000,
+                    "pages": [
+                        {"top": top, "height": min(1500, height - top)}
+                        for top in range(0, height, 1500)
+                    ],
+                },
+            ]
+        ),
         screenshot=AsyncMock(return_value=PNG),
     )
     calls = []
@@ -53,11 +70,69 @@ def test_html_escapes_content_and_md_keeps_it():
         },
         "owner": ["platform", "user"],
     }
-    document = rendering.detail_html(result, 1000)
+    document = rendering.content_html(result, 1000)
     assert "<script>" not in document and "&lt;script&gt;" in document
     assert "default-src" in document and "src=" not in document
     markdown = rendering.detail_markdown(result)
     assert "\u0060" * 4 + "json" in markdown and "\u0060" * 3 + "unsafe" in markdown
+
+
+async def test_overview_uses_readable_metadata_without_prompt(created):
+    result = (await detail(created))["data"]
+    result["persona"]["tools"] = None
+    document = rendering.overview_html(result, 1000)
+    assert "版本与权限" in document and "人格信息与能力" in document
+    assert "归属用户" in document and "平台实例" in document
+    assert "创建时间" in document and "更新时间" in document
+    assert "全部工具" in document and "已禁用" in document
+    assert "版本1" not in document and "系统提示词" not in document
+    assert "backup_summary" not in document and "created_at" not in document
+    assert "null" not in document
+
+
+@pytest.mark.parametrize("dialogs", [None, []])
+async def test_empty_dialogs_have_no_heading(created, dialogs):
+    result = (await detail(created))["data"]
+    result["persona"]["begin_dialogs"] = dialogs
+    document = rendering.content_html(result, 1000)
+    assert "预设对话" not in document
+    assert "自定义错误回复" not in document and "null" not in document
+    assert "系统提示词" in document and "版本1" in document
+
+
+async def test_content_groups_prompt_and_dialogs(created):
+    document = rendering.content_html((await detail(created))["data"], 1000)
+    assert document.index("系统提示词") < document.index("预设对话")
+    assert "第 1 轮 · 用户" in document and "第 1 轮 · 助手" in document
+    assert "你好" in document and "你好呀" in document
+    assert "归属用户" not in document and "人格信息与能力" not in document
+
+
+def test_prompt_heading_style_preserves_raw_text():
+    prompt = "开头\n\n【说话风格】\n <script>不要执行</script>\n\n结尾\n"
+    fragment = prompt_html(prompt)
+    assert 'class="prompt-heading"' in fragment
+    assert "<script>" not in fragment
+    assert html.unescape(re.sub(r"<[^>]*>", "", fragment)) == prompt
+
+
+async def test_overview_escapes_capability_names(created):
+    result = (await detail(created))["data"]
+    result["persona"]["tools"] = ['<script>alert("bad")</script>']
+    document = rendering.overview_html(result, 1000)
+    assert "<script>" not in document and "&lt;script&gt;" in document
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1791541635.7853906, "2026-10-09T10:27:15.800387", "2026-10-09T18:27:15+08:00"],
+)
+def test_metadata_times_use_consistent_utc(value):
+    assert format_time(value) == "2026-10-09 10:27:15 UTC"
+
+
+def test_page_height_does_not_require_fixed_line_multiple():
+    assert Settings.parse({"render_page_height": 1001}).render_page_height == 1001
 
 
 async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
@@ -78,12 +153,50 @@ async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
         created.studio, created.event, await detail(created), include_md=True
     )
     assert response["ok"], response
-    assert response["delivery"]["images_submitted"] == 2
+    assert response["delivery"]["images_submitted"] == 3
     assert response["delivery"]["md_submitted"]
     assert captured and "版本1" in captured[0]
     assert not list(tmp_path.rglob("*.md"))
     assert calls[0]["javascript_enabled"] is False
-    assert page.screenshot.call_args_list[1].kwargs["clip"]["y"] == 1500
+    assert page.screenshot.call_args_list[0].kwargs["clip"]["height"] == 1200
+    assert page.screenshot.call_args_list[2].kwargs["clip"]["y"] == 1500
+    assert 'data-sheet="overview"' in page.set_content.call_args_list[0].args[0]
+    assert 'data-sheet="content"' in page.set_content.call_args_list[1].args[0]
+
+
+@pytest.mark.parametrize("family", ["manage", "versions"])
+async def test_model_get_sends_overview_before_content(created, family):
+    payload = {"persona_id": "alice"}
+    if family == "versions":
+        updated = await created.studio.execute(
+            created.event,
+            "manage",
+            "update",
+            {"persona_id": "alice", "system_prompt": "版本2"},
+        )
+        assert updated["ok"], updated
+        payload = {"backup_id": updated["data"]["backup_id"]}
+    page, _ = fake_browser(created, height=450)
+    page.screenshot.side_effect = [PNG + b"overview", PNG + b"content"]
+    plugin = PersonaStudioPlugin(created.context, created.config)
+    plugin.studio = created.studio
+    handler = getattr(plugin, f"persona_{family}")
+    response = json.loads(await handler(created.event, "get", payload))
+    assert response["ok"], response
+    assert response["delivery"]["images_submitted"] == 2
+    assert not response["delivery"]["md_submitted"]
+    assert created.event.send.await_count == 2
+    messages = [call.args[0] for call in created.event.send.await_args_list]
+    assert [message.chain[0].type.value for message in messages] == ["Image", "Image"]
+    assert [message.chain[0].file for message in messages] == [
+        Image.fromBytes(PNG + b"overview").file,
+        Image.fromBytes(PNG + b"content").file,
+    ]
+    overview = page.set_content.call_args_list[0].args[0]
+    content = page.set_content.call_args_list[1].args[0]
+    assert 'data-sheet="overview"' in overview
+    assert "版本与权限" in overview and "人格信息与能力" in overview
+    assert 'data-sheet="content"' in content and "系统提示词" in content
 
 
 async def test_browser_missing_does_not_send_text(created):
@@ -102,7 +215,28 @@ async def test_page_limit_rejects_without_partial_images(created):
     )
     assert response["error"]["code"] == "render_limit"
     created.event.send.assert_not_called()
+    assert page.screenshot.await_count == 1
+
+
+async def test_overview_pixel_limit_rejects_without_splitting(created):
+    page, _ = fake_browser(created, overview_height=3000)
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), include_md=False
+    )
+    assert response["error"]["code"] == "render_limit"
+    assert "档案" in response["error"]["message"]
+    created.event.send.assert_not_called()
     page.screenshot.assert_not_called()
+
+
+async def test_total_page_limit_includes_overview(created):
+    fake_browser(created, height=500)
+    created.config["render_max_pages"] = 1
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), include_md=False
+    )
+    assert response["error"]["code"] == "render_limit"
+    created.event.send.assert_not_called()
 
 
 async def test_send_failure_reports_partial_without_retry(created):
@@ -164,10 +298,48 @@ async def test_real_browser_renders_long_offline_content(created, tmp_path):
         images = await rendering.render_pages(
             created.context, response["data"], Settings()
         )
-        assert len(images) >= 2
+        assert len(images) >= 3
         for index, image in enumerate(images):
             with Image.open(io.BytesIO(image)) as picture:
-                assert picture.width == 1000 and 0 < picture.height <= 1500
+                assert picture.width == 1000 and picture.height > 0
+                assert picture.width * picture.height <= Settings().render_max_pixels
+                if index:
+                    assert picture.height <= 1500
             (tmp_path / f"preview-{index + 1}.png").write_bytes(image)
+        prompt = (
+            "\n"
+            + "\n\n".join(
+                f"【第 {index + 1} 节】\n"
+                + "长段落完整换行验证，标点、中文与原始内容均保留。" * 20
+                for index in range(12)
+            )
+            + "\n"
+        )
+        response["data"]["persona"]["system_prompt"] = prompt
+        async with service.session(
+            viewport={"width": 1000, "height": 1500}, javascript_enabled=False
+        ) as page:
+            await page.set_content(rendering.content_html(response["data"], 1000))
+            layout = await page.evaluate(
+                rendering.PAGINATE_CONTENT, {"height": 1500, "maxPages": 19}
+            )
+            assert "error" not in layout and len(layout["pages"]) > 1
+            inspected = await page.evaluate("""() => {
+                const sheets = [...document.querySelectorAll('[data-sheet="content"]')];
+                let broken = 0;
+                for (const sheet of sheets) {
+                    const viewport = sheet.querySelector('.flow-window').getBoundingClientRect();
+                    for (const element of sheet.querySelectorAll('[data-text]')) {
+                        const range = document.createRange();
+                        range.selectNodeContents(element);
+                        for (const rect of range.getClientRects()) {
+                            if (rect.width > 0 && ((rect.top < viewport.top - .05 && rect.bottom > viewport.top + .05) || (rect.top < viewport.bottom - .05 && rect.bottom > viewport.bottom + .05))) broken++;
+                        }
+                    }
+                }
+                return {broken, prompt: sheets[0].querySelector('[data-text]').textContent};
+            }""")
+            assert inspected["broken"] == 0
+            assert inspected["prompt"] == prompt
     finally:
         await service.close()

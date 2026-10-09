@@ -85,7 +85,11 @@ def tool_parameters(family: str, settings) -> dict:
     return {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": actions},
+            "action": {
+                "type": "string",
+                "enum": actions,
+                "description": "查看或重新发送详情使用 get，由本工具发送档案图（版本、权限、人格信息与能力）及正文图；不要用聊天历史或其他渲染工具代替",
+            },
             "payload": {
                 "type": "object",
                 "properties": properties,

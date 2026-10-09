@@ -63,7 +63,7 @@
     "default": 1000
   },
   "render_page_height": {
-    "description": "详情图片分页高度（30 的倍数）",
+    "description": "正文图片分页高度",
     "type": "int",
     "default": 1500
   },
