@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import math
-import re
 import tempfile
 import unicodedata
 from pathlib import Path
@@ -110,16 +108,16 @@ def markdown_filename(result: dict) -> str:
 
 
 def detail_markdown(result: dict) -> str:
-    content = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
-    fence = "\u0060" * max(
-        3,
-        1
-        + max(
-            (len(match.group()) for match in re.finditer(r"\u0060+", content)),
-            default=0,
-        ),
-    )
-    return f"# 人格详情\n\n完整人格、版本与权限元信息：\n\n{fence}json\n{content}\n{fence}\n"
+    persona = result["persona"]
+    sections = [f"# 系统提示词\n\n{persona['system_prompt']}"]
+    dialogs = persona.get("begin_dialogs") or []
+    if dialogs:
+        dialog_sections = ["# 预设对话"]
+        for index, text in enumerate(dialogs):
+            role = "用户" if index % 2 == 0 else "助手"
+            dialog_sections.append(f"## 第 {index // 2 + 1} 轮 · {role}\n\n{text}")
+        sections.append("\n\n".join(dialog_sections))
+    return "\n\n".join(sections) + "\n"
 
 
 async def render_pages(context, result: dict, settings) -> list[bytes]:
@@ -272,6 +270,7 @@ async def present(studio, event, response: dict, *, include_md: bool) -> dict:
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
+                newline="",
                 suffix=".md",
                 prefix="persona_",
                 dir=directory,

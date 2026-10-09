@@ -103,7 +103,54 @@ def test_html_escapes_content_and_md_keeps_it():
     assert "<script>" not in document and "&lt;script&gt;" in document
     assert "default-src" in document and "src=" not in document
     markdown = rendering.detail_markdown(result)
-    assert "\u0060" * 4 + "json" in markdown and "\u0060" * 3 + "unsafe" in markdown
+    assert result["persona"]["system_prompt"] in markdown
+    assert "&lt;script&gt;" not in markdown
+
+
+def test_markdown_only_exports_prompt_and_dialogs():
+    result = {
+        "persona": {
+            "persona_id": "不应导出的人格ID",
+            "system_prompt": "# 原始角色设定\n\n**保持原文**",
+            "begin_dialogs": ["用户一", "助手一", "用户二", "助手二"],
+            "tools": ["不应导出的工具"],
+            "skills": ["不应导出的技能"],
+            "custom_error_message": "不应导出的错误回复",
+            "created_at": "不应导出的创建时间",
+            "updated_at": "不应导出的更新时间",
+        },
+        "owner": ["不应导出的平台", "不应导出的所有者"],
+        "revision": 7,
+        "locked": True,
+        "expected_revision": "不应导出的状态令牌",
+        "backup_summary": {"latest": {"backup_id": "不应导出的备份摘要"}},
+        "snapshot": {"backup_id": "不应导出的备份ID", "revision": 2},
+    }
+    assert rendering.detail_markdown(result) == (
+        "# 系统提示词\n\n# 原始角色设定\n\n**保持原文**\n\n"
+        "# 预设对话\n\n"
+        "## 第 1 轮 · 用户\n\n用户一\n\n"
+        "## 第 1 轮 · 助手\n\n助手一\n\n"
+        "## 第 2 轮 · 用户\n\n用户二\n\n"
+        "## 第 2 轮 · 助手\n\n助手二\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "# 原始标题\n\n**粗体**\n- 列表\n",
+        "开头\n\n末尾\n\n",
+        "首行\r\n第二行\r\n",
+        "\u0060" * 3 + "python\nprint('你好')\n" + "\u0060" * 3,
+        '<script>alert("原文")</script>',
+        "长提示词原文与换行完整保留。\n" * 3000,
+    ],
+    ids=["markdown", "blank_lines", "crlf", "code_fence", "html", "long_prompt"],
+)
+def test_markdown_preserves_prompt_text_without_truncation(prompt):
+    result = {"persona": {"system_prompt": prompt, "begin_dialogs": []}}
+    assert rendering.detail_markdown(result) == f"# 系统提示词\n\n{prompt}\n"
 
 
 async def test_overview_uses_readable_metadata_without_prompt(created):
@@ -127,6 +174,7 @@ async def test_empty_dialogs_have_no_heading(created, dialogs):
     assert "预设对话" not in document
     assert "自定义错误回复" not in document and "null" not in document
     assert "系统提示词" in document and "版本1" in document
+    assert rendering.detail_markdown(result) == "# 系统提示词\n\n版本1\n"
 
 
 async def test_content_groups_prompt_and_dialogs(created):
@@ -176,7 +224,7 @@ async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
             captured_names.append(component.name)
             path = await component.get_file()
             captured.append(
-                await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
+                (await asyncio.to_thread(Path(path).read_bytes)).decode("utf-8")
             )
 
     created.event.send = AsyncMock(side_effect=send)
@@ -187,7 +235,11 @@ async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
     assert response["delivery"]["images_submitted"] == 3
     assert response["delivery"]["md_submitted"]
     assert captured_names == ["人格_alice_当前_v1.md"]
-    assert captured and "版本1" in captured[0]
+    assert captured == [
+        "# 系统提示词\n\n版本1\n\n# 预设对话\n\n"
+        "## 第 1 轮 · 用户\n\n你好\n\n"
+        "## 第 1 轮 · 助手\n\n你好呀\n"
+    ]
     assert not list(tmp_path.rglob("*.md"))
     assert calls[0]["javascript_enabled"] is False
     assert page.screenshot.call_args_list[0].kwargs["clip"]["height"] == 1200
@@ -196,7 +248,7 @@ async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
     assert 'data-sheet="content"' in page.set_content.call_args_list[1].args[0]
 
 
-async def test_historical_md_filename_uses_snapshot_revision(
+async def test_historical_md_uses_snapshot_content_and_revision(
     created, tmp_path, monkeypatch
 ):
     updated = await created.studio.execute(
@@ -217,6 +269,17 @@ async def test_historical_md_filename_uses_snapshot_revision(
     assert response["data"]["snapshot"]["revision"] == 1
     fake_browser(created, height=450)
     monkeypatch.setattr(rendering, "get_astrbot_temp_path", lambda: str(tmp_path))
+    captured = []
+
+    async def send(message):
+        component = message.chain[0]
+        if component.type.value == "File":
+            path = await component.get_file()
+            captured.append(
+                (await asyncio.to_thread(Path(path).read_bytes)).decode("utf-8")
+            )
+
+    created.event.send = AsyncMock(side_effect=send)
     response = await rendering.present(
         created.studio, created.event, response, include_md=True
     )
@@ -224,6 +287,11 @@ async def test_historical_md_filename_uses_snapshot_revision(
     file = created.event.send.await_args_list[-1].args[0].chain[0]
     assert file.type.value == "File"
     assert file.name == "人格_alice_历史_v1.md"
+    assert captured == [
+        "# 系统提示词\n\n版本1\n\n# 预设对话\n\n"
+        "## 第 1 轮 · 用户\n\n你好\n\n"
+        "## 第 1 轮 · 助手\n\n你好呀\n"
+    ]
     assert not list(tmp_path.rglob("*.md"))
 
 

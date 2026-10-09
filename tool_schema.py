@@ -16,7 +16,7 @@ def tool_parameters(family: str, settings) -> dict:
         },
         "include_md": {
             "type": "boolean",
-            "description": "get 时同时发送完整 Markdown 文件，默认 false",
+            "description": "get 时同时发送仅含系统提示词和预设对话的 Markdown 文件，默认 false",
         },
     }
     if family == "manage":
@@ -88,7 +88,7 @@ def tool_parameters(family: str, settings) -> dict:
             "action": {
                 "type": "string",
                 "enum": actions,
-                "description": "查看或重新发送详情使用 get，由本工具发送档案图（版本、权限、人格信息与能力）及正文图；不要用聊天历史或其他渲染工具代替",
+                "description": "执行的操作；get 自行发送档案图及正文图，并返回结构化详情与发送回执",
             },
             "payload": {
                 "type": "object",
