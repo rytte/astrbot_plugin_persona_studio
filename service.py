@@ -19,6 +19,7 @@ from .domain import (
     record_ref,
     validate_content,
     validate_id,
+    view_options,
 )
 
 
@@ -350,7 +351,7 @@ class PersonaStudio:
             record = self.storage.register(persona_id, record_ref(data), actor.owner)
             return {"persona": data, "owner": actor.owner, **self.state(record, data)}
         allowed = {
-            "get": {"persona_id", "include_md"},
+            "get": {"persona_id", "format", "content"},
             "update": CONTENT_FIELDS | {"persona_id"},
             "delete": {"persona_id"},
             "switch": {"persona_id"},
@@ -360,6 +361,8 @@ class PersonaStudio:
                 "invalid_action",
                 "persona_manage 仅支持 list/get/create/update/delete/switch。",
             )
+        if action == "get":
+            view_options(payload)
         check_payload(payload, allowed[action], {"persona_id"})
         persona_id = validate_id(payload["persona_id"])
         persona = await self.current(persona_id)
@@ -368,8 +371,6 @@ class PersonaStudio:
         actor = identify(event, self.settings())
         record = self.authorized(actor, persona, write=action in {"update", "delete"})
         if action == "get":
-            if type(payload.get("include_md", False)) is not bool:
-                raise StudioError("invalid_payload", "include_md 必须为布尔值。")
             backups = self.storage.backups(record["chain_id"]) if record else []
             return {
                 "persona": persona,
@@ -523,7 +524,7 @@ class PersonaStudio:
                 "limit": limit,
             }
         allowed = {
-            "get": {"backup_id", "include_md"},
+            "get": {"backup_id", "format", "content"},
             "restore": {"backup_id", "expected_revision"},
             "delete": {"backup_id"},
         }
@@ -531,6 +532,8 @@ class PersonaStudio:
             raise StudioError(
                 "invalid_action", "persona_versions 仅支持 list/get/restore/delete。"
             )
+        if action == "get":
+            view_options(payload)
         check_payload(
             payload,
             allowed[action],
@@ -560,8 +563,6 @@ class PersonaStudio:
         ):
             raise StudioError("backup_expired", "备份已超过保留期限，不能使用。")
         if action == "get":
-            if type(payload.get("include_md", False)) is not bool:
-                raise StudioError("invalid_payload", "include_md 必须为布尔值。")
             return {
                 "snapshot": snapshot,
                 "persona": snapshot["persona"],

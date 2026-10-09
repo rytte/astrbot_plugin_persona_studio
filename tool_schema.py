@@ -14,9 +14,15 @@ def tool_parameters(family: str, settings) -> dict:
             "maximum": 100,
             "description": "list 每页数量，默认 20",
         },
-        "include_md": {
-            "type": "boolean",
-            "description": "get 时同时发送仅含系统提示词和预设对话的 Markdown 文件，默认 false",
+        "format": {
+            "type": "string",
+            "enum": ["text", "image", "markdown"],
+            "description": "仅 get：text 为合并转发文字（仅 OneBot/Aiocqhttp），image 为图片（默认），markdown 为 MD 文件；每次仅发送一种形式",
+        },
+        "content": {
+            "type": "string",
+            "enum": ["metadata", "prompt", "all"],
+            "description": "仅 get：metadata 为版本权限、人格信息及工具/技能和自定义错误回复；prompt 为系统提示词与预设对话（默认）；all 为两者",
         },
     }
     if family == "manage":
@@ -88,7 +94,7 @@ def tool_parameters(family: str, settings) -> dict:
             "action": {
                 "type": "string",
                 "enum": actions,
-                "description": "执行的操作；get 自行发送档案图及正文图，并返回结构化详情与发送回执",
+                "description": "执行的操作；get 按 format/content 自行发送所选详情，默认仅发送提示词图片，并返回结构化详情与发送回执",
             },
             "payload": {
                 "type": "object",

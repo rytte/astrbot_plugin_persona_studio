@@ -22,6 +22,24 @@ def test_parameters_are_valid_json_schema(family):
         )
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"action": "get", "payload": {"owner": "attacker"}}, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"action": "get", "payload": {"include_md": True}}, schema)
+    for output_format in ("text", "image", "markdown"):
+        for content in ("metadata", "prompt", "all"):
+            jsonschema.validate(
+                {
+                    "action": "get",
+                    "payload": {
+                        "persona_id" if family == "manage" else "backup_id": "id",
+                        "format": output_format,
+                        "content": content,
+                    },
+                },
+                schema,
+            )
+    for payload in ({"format": "md"}, {"format": None}, {"content": "both"}):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({"action": "get", "payload": payload}, schema)
 
 
 def test_gemini_payload_has_fields_and_nullable_capabilities():

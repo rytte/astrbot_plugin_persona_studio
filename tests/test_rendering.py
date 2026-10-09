@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import Image, Nodes
 from astrbot_plugin_persona_studio import rendering
 from astrbot_plugin_persona_studio.domain import Settings, StudioError
 from astrbot_plugin_persona_studio.main import PersonaStudioPlugin
@@ -18,21 +18,25 @@ from astrbot_plugin_persona_studio.templates import format_time, prompt_html
 PNG = b"\x89PNG\r\n\x1a\nimage"
 
 
-def fake_browser(env, *, height=3000, overview_height=1200, ready=True):
+def fake_browser(
+    env, *, height=3000, overview_height=1200, ready=True, content="prompt"
+):
+    measurements = []
+    if content in {"metadata", "all"}:
+        measurements.append({"width": 1000, "height": overview_height})
+    if content in {"prompt", "all"}:
+        measurements.append(
+            {
+                "width": 1000,
+                "pages": [
+                    {"top": top, "height": min(1500, height - top)}
+                    for top in range(0, height, 1500)
+                ],
+            }
+        )
     page = SimpleNamespace(
         set_content=AsyncMock(),
-        evaluate=AsyncMock(
-            side_effect=[
-                {"width": 1000, "height": overview_height},
-                {
-                    "width": 1000,
-                    "pages": [
-                        {"top": top, "height": min(1500, height - top)}
-                        for top in range(0, height, 1500)
-                    ],
-                },
-            ]
-        ),
+        evaluate=AsyncMock(side_effect=measurements),
         screenshot=AsyncMock(return_value=PNG),
     )
     calls = []
@@ -78,11 +82,13 @@ def test_markdown_filename_is_readable_and_safe(persona_id, expected):
 
 
 @pytest.mark.parametrize("persona_id", ["澪" * 255, "A" * 255, "澪😊" * 100])
-def test_markdown_filename_limits_bytes_without_breaking_unicode(persona_id):
+@pytest.mark.parametrize("content", ["metadata", "prompt", "all"])
+def test_markdown_filename_limits_bytes_without_breaking_unicode(persona_id, content):
     result = {"persona": {"persona_id": persona_id}, "revision": 3}
-    name = rendering.markdown_filename(result)
+    name = rendering.markdown_filename(result, content)
     assert len(name.encode("utf-8")) <= 200
-    assert name.startswith("人格_") and name.endswith("_当前_v3.md")
+    scope = {"metadata": "_元数据", "prompt": "", "all": "_完整"}[content]
+    assert name.startswith("人格_") and name.endswith(f"_当前_v3{scope}.md")
     assert "\ufffd" not in name
 
 
@@ -175,6 +181,7 @@ async def test_empty_dialogs_have_no_heading(created, dialogs):
     assert "自定义错误回复" not in document and "null" not in document
     assert "系统提示词" in document and "版本1" in document
     assert rendering.detail_markdown(result) == "# 系统提示词\n\n版本1\n"
+    assert rendering.text_sections(result, "prompt") == [("系统提示词", "版本1")]
 
 
 async def test_content_groups_prompt_and_dialogs(created):
@@ -212,7 +219,7 @@ def test_page_height_does_not_require_fixed_line_multiple():
     assert Settings.parse({"render_page_height": 1001}).render_page_height == 1001
 
 
-async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
+async def test_prompt_markdown_sends_only_file(created, tmp_path, monkeypatch):
     page, calls = fake_browser(created)
     monkeypatch.setattr(rendering, "get_astrbot_temp_path", lambda: str(tmp_path))
     captured = []
@@ -229,10 +236,10 @@ async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
 
     created.event.send = AsyncMock(side_effect=send)
     response = await rendering.present(
-        created.studio, created.event, await detail(created), include_md=True
+        created.studio, created.event, await detail(created), format="markdown"
     )
     assert response["ok"], response
-    assert response["delivery"]["images_submitted"] == 3
+    assert response["delivery"]["images_submitted"] == 0
     assert response["delivery"]["md_submitted"]
     assert captured_names == ["人格_alice_当前_v1.md"]
     assert captured == [
@@ -241,11 +248,10 @@ async def test_paginated_images_and_optional_md(created, tmp_path, monkeypatch):
         "## 第 1 轮 · 助手\n\n你好呀\n"
     ]
     assert not list(tmp_path.rglob("*.md"))
-    assert calls[0]["javascript_enabled"] is False
-    assert page.screenshot.call_args_list[0].kwargs["clip"]["height"] == 1200
-    assert page.screenshot.call_args_list[2].kwargs["clip"]["y"] == 1500
-    assert 'data-sheet="overview"' in page.set_content.call_args_list[0].args[0]
-    assert 'data-sheet="content"' in page.set_content.call_args_list[1].args[0]
+    assert not calls
+    page.set_content.assert_not_called()
+    page.screenshot.assert_not_called()
+    assert created.event.send.await_count == 1
 
 
 async def test_historical_md_uses_snapshot_content_and_revision(
@@ -281,7 +287,7 @@ async def test_historical_md_uses_snapshot_content_and_revision(
 
     created.event.send = AsyncMock(side_effect=send)
     response = await rendering.present(
-        created.studio, created.event, response, include_md=True
+        created.studio, created.event, response, format="markdown"
     )
     assert response["ok"] and response["delivery"]["md_submitted"]
     file = created.event.send.await_args_list[-1].args[0].chain[0]
@@ -307,7 +313,8 @@ async def test_model_get_sends_overview_before_content(created, family):
         )
         assert updated["ok"], updated
         payload = {"backup_id": updated["data"]["backup_id"]}
-    page, _ = fake_browser(created, height=450)
+    payload["content"] = "all"
+    page, _ = fake_browser(created, height=450, content="all")
     page.screenshot.side_effect = [PNG + b"overview", PNG + b"content"]
     plugin = PersonaStudioPlugin(created.context, created.config)
     plugin.studio = created.studio
@@ -332,7 +339,7 @@ async def test_model_get_sends_overview_before_content(created, family):
 
 async def test_browser_missing_does_not_send_text(created):
     response = await rendering.present(
-        created.studio, created.event, await detail(created), include_md=False
+        created.studio, created.event, await detail(created)
     )
     assert response["error"]["code"] == "browser_unavailable"
     assert response["data"]["persona"]["system_prompt"] == "版本1"
@@ -340,9 +347,9 @@ async def test_browser_missing_does_not_send_text(created):
 
 
 async def test_page_limit_rejects_without_partial_images(created):
-    page, _ = fake_browser(created, height=100000)
+    page, _ = fake_browser(created, height=100000, content="all")
     response = await rendering.present(
-        created.studio, created.event, await detail(created), include_md=False
+        created.studio, created.event, await detail(created), content="all"
     )
     assert response["error"]["code"] == "render_limit"
     created.event.send.assert_not_called()
@@ -350,9 +357,9 @@ async def test_page_limit_rejects_without_partial_images(created):
 
 
 async def test_overview_pixel_limit_rejects_without_splitting(created):
-    page, _ = fake_browser(created, overview_height=3000)
+    page, _ = fake_browser(created, overview_height=3000, content="metadata")
     response = await rendering.present(
-        created.studio, created.event, await detail(created), include_md=False
+        created.studio, created.event, await detail(created), content="metadata"
     )
     assert response["error"]["code"] == "render_limit"
     assert "档案" in response["error"]["message"]
@@ -361,10 +368,10 @@ async def test_overview_pixel_limit_rejects_without_splitting(created):
 
 
 async def test_total_page_limit_includes_overview(created):
-    fake_browser(created, height=500)
+    fake_browser(created, height=500, content="all")
     created.config["render_max_pages"] = 1
     response = await rendering.present(
-        created.studio, created.event, await detail(created), include_md=False
+        created.studio, created.event, await detail(created), content="all"
     )
     assert response["error"]["code"] == "render_limit"
     created.event.send.assert_not_called()
@@ -374,7 +381,7 @@ async def test_send_failure_reports_partial_without_retry(created):
     fake_browser(created)
     created.event.send.side_effect = [None, RuntimeError("platform failed")]
     response = await rendering.present(
-        created.studio, created.event, await detail(created), include_md=False
+        created.studio, created.event, await detail(created)
     )
     assert not response["ok"] and not response["retry_safe"]
     assert response["delivery"]["images_submitted"] == 1
@@ -401,11 +408,259 @@ async def test_revocation_while_rendering_does_not_return_raw_data(created):
 
     page.screenshot.side_effect = revoke
     response = await rendering.present(
-        created.studio, created.event, await detail(created), include_md=False
+        created.studio, created.event, await detail(created)
     )
     assert response["error"]["code"] == "forbidden"
     assert "data" not in response
     created.event.send.assert_not_called()
+
+
+@pytest.mark.parametrize("family", ["manage", "versions"])
+@pytest.mark.parametrize("output_format", ["text", "image", "markdown"])
+@pytest.mark.parametrize("content", ["metadata", "prompt", "all"])
+async def test_model_get_format_content_matrix(
+    created, tmp_path, monkeypatch, family, output_format, content
+):
+    await created.manager.update_persona(
+        "alice", custom_error_message="META_ERROR", tools=None, skills=[]
+    )
+    payload = {"persona_id": "alice"}
+    if family == "versions":
+        updated = await created.studio.execute(
+            created.event,
+            "manage",
+            "update",
+            {"persona_id": "alice", "system_prompt": "版本2"},
+        )
+        assert updated["ok"], updated
+        payload = {"backup_id": updated["data"]["backup_id"]}
+    payload.update({"format": output_format, "content": content})
+    created.event.platform_meta.name = "aiocqhttp"
+    monkeypatch.setattr(rendering, "get_astrbot_temp_path", lambda: str(tmp_path))
+    captured_files = []
+
+    async def send(message):
+        component = message.chain[0]
+        if component.type.value == "File":
+            path = await component.get_file()
+            captured_files.append(
+                (
+                    component.name,
+                    (await asyncio.to_thread(Path(path).read_bytes)).decode("utf-8"),
+                )
+            )
+
+    created.event.send = AsyncMock(side_effect=send)
+    if output_format == "image":
+        page, _ = fake_browser(created, height=450, content=content)
+    plugin = PersonaStudioPlugin(created.context, created.config)
+    plugin.studio = created.studio
+    response = json.loads(
+        await getattr(plugin, f"persona_{family}")(created.event, "get", payload)
+    )
+    assert response["ok"], response
+    assert response["delivery"]["format"] == output_format
+    assert response["delivery"]["content"] == content
+    assert response["data"]["persona"]["system_prompt"] == "版本1"
+    if output_format == "image":
+        expected_sheets = (
+            ["overview", "content"]
+            if content == "all"
+            else ["overview" if content == "metadata" else "content"]
+        )
+        documents = [call.args[0] for call in page.set_content.await_args_list]
+        assert len(documents) == len(expected_sheets)
+        for document, sheet in zip(documents, expected_sheets):
+            assert f'data-sheet="{sheet}"' in document
+            if sheet == "content":
+                assert 'class="hero-meta"' not in document
+        displayed = "\n".join(documents)
+        assert response["delivery"]["images_submitted"] == len(expected_sheets)
+        assert not response["delivery"]["md_submitted"]
+        assert response["delivery"]["forwards_submitted"] == 0
+        assert all(
+            call.args[0].chain[0].type.value == "Image"
+            for call in created.event.send.await_args_list
+        )
+    elif output_format == "markdown":
+        assert len(captured_files) == 1
+        scope = {"metadata": "_元数据", "prompt": "", "all": "_完整"}[content]
+        kind = "历史" if family == "versions" else "当前"
+        assert captured_files[0][0] == f"人格_alice_{kind}_v1{scope}.md"
+        displayed = captured_files[0][1]
+        assert response["delivery"]["md_submitted"]
+        assert response["delivery"]["images_submitted"] == 0
+        assert response["delivery"]["forwards_submitted"] == 0
+        assert created.event.send.await_count == 1
+        assert not list(tmp_path.rglob("*.md"))
+    else:
+        assert created.event.send.await_count == 1
+        component = created.event.send.await_args.args[0].chain[0]
+        assert isinstance(component, Nodes)
+        assert all(
+            node.uin == "bot" and node.name == "人格捏造" for node in component.nodes
+        )
+        displayed = "\n".join(node.content[0].text for node in component.nodes)
+        assert response["delivery"]["forwards_submitted"] == 1
+        assert response["delivery"]["forward_nodes_submitted"] == len(component.nodes)
+        assert response["delivery"]["images_submitted"] == 0
+        assert not response["delivery"]["md_submitted"]
+    assert ("版本与权限" in displayed) == (content in {"metadata", "all"})
+    assert ("META_ERROR" in displayed) == (content in {"metadata", "all"})
+    assert ("系统提示词" in displayed) == (content in {"prompt", "all"})
+    assert ("预设对话" in displayed) == (content in {"prompt", "all"})
+    if content in {"metadata", "all"}:
+        assert "全部工具" in displayed and "已禁用" in displayed
+
+
+@pytest.mark.parametrize("family", ["manage", "versions"])
+async def test_default_get_sends_prompt_only(created, family):
+    payload = {"persona_id": "alice"}
+    if family == "versions":
+        updated = await created.studio.execute(
+            created.event,
+            "manage",
+            "update",
+            {"persona_id": "alice", "system_prompt": "版本2"},
+        )
+        assert updated["ok"], updated
+        payload = {"backup_id": updated["data"]["backup_id"]}
+    page, _ = fake_browser(created, height=450)
+    plugin = PersonaStudioPlugin(created.context, created.config)
+    plugin.studio = created.studio
+    response = json.loads(
+        await getattr(plugin, f"persona_{family}")(created.event, "get", payload)
+    )
+    assert response["ok"], response
+    assert response["delivery"]["format"] == "image"
+    assert response["delivery"]["content"] == "prompt"
+    assert response["delivery"]["images_submitted"] == 1
+    assert created.event.send.await_count == 1
+    page.set_content.assert_awaited_once()
+    document = page.set_content.await_args.args[0]
+    assert 'data-sheet="content"' in document
+    assert 'class="hero-meta"' not in document
+    assert "版本与权限" not in document
+
+
+async def test_prompt_single_page_does_not_reserve_overview_slot(created):
+    created.config["render_max_pages"] = 1
+    fake_browser(created, height=450)
+    response = await rendering.present(
+        created.studio, created.event, await detail(created)
+    )
+    assert response["ok"] and response["delivery"]["images_submitted"] == 1
+
+
+async def test_paginated_all_images_preserve_order(created):
+    page, calls = fake_browser(created, content="all")
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), content="all"
+    )
+    assert response["ok"] and response["delivery"]["images_submitted"] == 3
+    assert calls[0]["javascript_enabled"] is False
+    assert page.screenshot.call_args_list[0].kwargs["clip"]["height"] == 1200
+    assert page.screenshot.call_args_list[2].kwargs["clip"]["y"] == 1500
+    assert page.evaluate.call_args_list[1].args[1]["maxPages"] == 19
+    assert 'data-sheet="overview"' in page.set_content.call_args_list[0].args[0]
+    assert 'data-sheet="content"' in page.set_content.call_args_list[1].args[0]
+
+
+async def test_text_requires_forward_capable_platform(created):
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), format="text"
+    )
+    assert response["error"]["code"] == "forward_unavailable"
+    assert response["delivery"]["forwards_submitted"] == 0
+    created.event.send.assert_not_called()
+
+
+async def test_forward_chunks_preserve_all_prompt_text(created):
+    prompt = "首行\n\n" + "完整原文，中文与换行不能丢失。" * 900 + "\n结尾"
+    await created.manager.update_persona("alice", system_prompt=prompt)
+    created.event.platform_meta.name = "aiocqhttp"
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), format="text"
+    )
+    assert response["ok"], response
+    nodes = created.event.send.await_args.args[0].chain[0].nodes
+    prompt_nodes = [
+        node for node in nodes if node.content[0].text.startswith("系统提示词")
+    ]
+    assert len(prompt_nodes) > 1
+    assert (
+        "".join(node.content[0].text.split("\n\n", 1)[1] for node in prompt_nodes)
+        == prompt
+    )
+    assert all(
+        len(node.content[0].text) <= rendering.FORWARD_NODE_CHARS for node in nodes
+    )
+
+
+async def test_forward_node_limit_does_not_send_partial_text(created, monkeypatch):
+    created.event.platform_meta.name = "aiocqhttp"
+    monkeypatch.setattr(rendering, "FORWARD_MAX_NODES", 1)
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), format="text"
+    )
+    assert response["error"]["code"] == "forward_limit"
+    assert response["delivery"]["forward_nodes_submitted"] == 0
+    created.event.send.assert_not_called()
+
+
+async def test_forward_uses_native_private_forward_api(created):
+    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+        AiocqhttpMessageEvent,
+    )
+
+    created.event.platform_meta.name = "aiocqhttp"
+    response = await rendering.present(
+        created.studio,
+        created.event,
+        await detail(created),
+        format="text",
+        content="all",
+    )
+    assert response["ok"], response
+    bot = SimpleNamespace(call_action=AsyncMock())
+    message = created.event.send.await_args.args[0]
+    await AiocqhttpMessageEvent.send_message(
+        bot=bot,
+        event={"self_id": "bot"},
+        message_chain=message,
+        is_group=False,
+        session_id="user",
+    )
+    bot.call_action.assert_awaited_once()
+    call = bot.call_action.await_args
+    assert call.args == ("send_private_forward_msg",)
+    assert call.kwargs["user_id"] == "user"
+    assert (
+        len(call.kwargs["messages"]) == response["delivery"]["forward_nodes_submitted"]
+    )
+    assert all(node["data"]["user_id"] == "bot" for node in call.kwargs["messages"])
+
+
+@pytest.mark.parametrize("output_format", ["image", "text", "markdown"])
+async def test_revocation_after_delivery_hides_structured_data(
+    created, tmp_path, monkeypatch, output_format
+):
+    if output_format == "image":
+        fake_browser(created, height=450)
+    created.event.platform_meta.name = "aiocqhttp"
+    monkeypatch.setattr(rendering, "get_astrbot_temp_path", lambda: str(tmp_path))
+
+    async def revoke(message):
+        created.config["whitelist"] = []
+
+    created.event.send = AsyncMock(side_effect=revoke)
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), format=output_format
+    )
+    assert not response["ok"] and "data" not in response
+    assert not response["retry_safe"]
+    assert created.event.send.await_count == 1
+    assert not list(tmp_path.rglob("*.md"))
 
 
 @pytest.mark.parametrize("page_height", [1001, 1500])
@@ -440,6 +695,23 @@ async def test_real_browser_renders_long_offline_content(
                 if index:
                     assert picture.height <= 1500
             (tmp_path / f"preview-{index + 1}.png").write_bytes(image)
+        for content in ("metadata", "all"):
+            selected_images = await rendering.render_pages(
+                created.context, response["data"], Settings(), content
+            )
+            if content == "metadata":
+                assert len(selected_images) == 1
+            else:
+                assert len(selected_images) == len(images) + 1
+            for index, image in enumerate(selected_images):
+                with Image.open(io.BytesIO(image)) as picture:
+                    assert picture.width == 1000 and picture.height > 0
+                    assert (
+                        picture.width * picture.height <= Settings().render_max_pixels
+                    )
+                    if index:
+                        assert picture.height <= 1500
+                (tmp_path / f"{content}-{index + 1}.png").write_bytes(image)
         prompt = (
             "\n"
             + "\n\n".join(
@@ -492,7 +764,7 @@ async def test_real_browser_renders_long_offline_content(
             assert inspected["prompt"] == prompt
             first_page = inspected["pages"][0]
             assert first_page["hasHeader"] and first_page["hasTitle"]
-            assert first_page["hasMetadata"]
+            assert not first_page["hasMetadata"]
             assert not first_page["continuation"] and not first_page["hintVisible"]
             for index, subsequent_page in enumerate(inspected["pages"][1:], start=2):
                 assert not subsequent_page["hasHeader"]

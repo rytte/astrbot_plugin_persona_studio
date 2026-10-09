@@ -7,11 +7,14 @@ import unicodedata
 from pathlib import Path
 
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import File, Image
+from astrbot.api.message_components import File, Image, Node, Nodes, Plain
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
-from .domain import StudioError, identify
-from .templates import content_html, overview_html
+from .domain import StudioError, identify, view_options
+from .templates import content_html, metadata_fields, overview_html
+
+FORWARD_NODE_CHARS = 4000
+FORWARD_MAX_NODES = 100
 
 PAGINATE_CONTENT = r"""
 async ({height, maxPages}) => {
@@ -87,12 +90,13 @@ async ({height, maxPages}) => {
 """
 
 
-def markdown_filename(result: dict) -> str:
+def markdown_filename(result: dict, content: str = "prompt") -> str:
     snapshot = result.get("snapshot")
     revision = snapshot["revision"] if snapshot else result["revision"]
     kind = "历史" if snapshot else "当前"
     prefix = "人格_"
-    suffix = f"_{kind}_v{revision}.md"
+    scope = {"metadata": "_元数据", "prompt": "", "all": "_完整"}[content]
+    suffix = f"_{kind}_v{revision}{scope}.md"
     name = "".join(
         "_"
         if character in '<>:"/\\|?*'
@@ -107,9 +111,42 @@ def markdown_filename(result: dict) -> str:
     return f"{prefix}{name or '未命名'}{suffix}"
 
 
-def detail_markdown(result: dict) -> str:
+def metadata_sections(result: dict) -> list[tuple[str, list[tuple]]]:
+    version_fields, persona_fields = metadata_fields(result)
+    version_fields.append(
+        (
+            "权限说明",
+            "锁定仅约束本插件；查看与切换不受锁定影响。工具配置不代表执行授权。",
+            True,
+        )
+    )
+    for name, label in (("tools", "可用工具"), ("skills", "可用技能")):
+        names = result["persona"].get(name)
+        value = (
+            ("全部工具" if name == "tools" else "全部技能")
+            if names is None
+            else "\n".join(names)
+            if names
+            else "已禁用"
+        )
+        persona_fields.append((label, value, True))
+    return [("版本与权限", version_fields), ("人格信息与能力", persona_fields)]
+
+
+def detail_markdown(result: dict, content: str = "prompt") -> str:
+    _, content = view_options({"content": content})
     persona = result["persona"]
-    sections = [f"# 系统提示词\n\n{persona['system_prompt']}"]
+    sections = []
+    if content in {"metadata", "all"}:
+        for title, fields in metadata_sections(result):
+            lines = [f"# {title}"]
+            for label, value, _ in fields:
+                value_text = str(value).replace("\n", "\n  ")
+                lines.append(f"- {label}：{value_text}")
+            sections.append("\n\n".join(lines))
+    if content == "metadata":
+        return "\n\n".join(sections) + "\n"
+    sections.append(f"# 系统提示词\n\n{persona['system_prompt']}")
     dialogs = persona.get("begin_dialogs") or []
     if dialogs:
         dialog_sections = ["# 预设对话"]
@@ -120,7 +157,71 @@ def detail_markdown(result: dict) -> str:
     return "\n\n".join(sections) + "\n"
 
 
-async def render_pages(context, result: dict, settings) -> list[bytes]:
+def text_sections(result: dict, content: str) -> list[tuple[str, str]]:
+    sections = []
+    if content in {"metadata", "all"}:
+        sections.extend(
+            (title, "\n".join(f"{label}：{value}" for label, value, _ in fields))
+            for title, fields in metadata_sections(result)
+        )
+    if content in {"prompt", "all"}:
+        sections.append(("系统提示词", result["persona"]["system_prompt"]))
+        for index, text in enumerate(result["persona"].get("begin_dialogs") or []):
+            role = "用户" if index % 2 == 0 else "助手"
+            sections.append((f"预设对话 · 第 {index // 2 + 1} 轮 · {role}", text))
+    return sections
+
+
+def split_text(text: str, limit: int) -> list[str]:
+    if limit <= 0:
+        raise StudioError("forward_limit", "转发节点没有足够空间容纳正文。")
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + limit, len(text))
+        if end < len(text):
+            newline = text.rfind("\n", start, end)
+            if newline > start:
+                end = newline + 1
+        chunks.append(text[start:end])
+        start = end
+    return chunks or [""]
+
+
+def forward_message(event, result: dict, content: str) -> tuple[MessageChain, int]:
+    _, content = view_options({"content": content})
+    if event.get_platform_name() != "aiocqhttp":
+        raise StudioError(
+            "forward_unavailable",
+            "文字合并转发仅支持 OneBot/Aiocqhttp；请选择 image 或 markdown，不会自动改发普通文字。",
+        )
+    bot_id = event.get_self_id()
+    if not bot_id:
+        raise StudioError("invalid_identity", "缺少机器人账号 ID，不能发送合并转发。")
+    nodes = []
+    for title, text in text_sections(result, content):
+        chunks = split_text(text, FORWARD_NODE_CHARS - len(title) - 32)
+        for index, chunk in enumerate(chunks, start=1):
+            heading = f"{title}（{index}/{len(chunks)}）" if len(chunks) > 1 else title
+            nodes.append(
+                Node(
+                    name="人格捏造",
+                    uin=str(bot_id),
+                    content=[Plain(f"{heading}\n\n{chunk}")],
+                )
+            )
+            if len(nodes) > FORWARD_MAX_NODES:
+                raise StudioError(
+                    "forward_limit",
+                    f"合并转发超过 {FORWARD_MAX_NODES} 个节点，未发送截断内容；请选择 markdown。",
+                )
+    return MessageChain([Nodes(nodes)], type="tool_direct_result"), len(nodes)
+
+
+async def render_pages(
+    context, result: dict, settings, content: str = "prompt"
+) -> list[bytes]:
+    _, content = view_options({"content": content})
     registered = context.get_registered_star("astrbot_plugin_browser")
     service = getattr(getattr(registered, "star_cls", None), "service", None)
     if (
@@ -144,39 +245,47 @@ async def render_pages(context, result: dict, settings) -> list[bytes]:
             javascript_enabled=False,
             timeout=settings.render_timeout,
         ) as page:
-            await page.set_content(
-                overview_html(result, settings.render_width), wait_until="load"
-            )
-            overview = await page.evaluate(
-                "async () => { await document.fonts.ready; return {width: document.documentElement.scrollWidth, height: Math.ceil(document.querySelector('.sheet').getBoundingClientRect().height)}; }"
-            )
-            width, height = overview["width"], overview["height"]
-            if (
-                not isinstance(width, int | float)
-                or not isinstance(height, int | float)
-                or not math.isfinite(width)
-                or not math.isfinite(height)
-                or width > settings.render_width
-                or width <= 0
-                or height <= 0
-                or settings.render_width * height > settings.render_max_pixels
-            ):
-                raise StudioError(
-                    "render_limit",
-                    "人格档案尺寸无效或超出单图像素上限；档案不拆页、不截断。",
+            if content in {"metadata", "all"}:
+                await page.set_content(
+                    overview_html(result, settings.render_width), wait_until="load"
                 )
-            image = await page.screenshot(
-                type="png",
-                animations="disabled",
-                full_page=True,
-                clip={"x": 0, "y": 0, "width": settings.render_width, "height": height},
-                timeout=settings.render_timeout * 1000,
-            )
-            if not isinstance(image, bytes) or not image.startswith(
-                b"\x89PNG\r\n\x1a\n"
-            ):
-                raise StudioError("render_failed", "浏览器没有返回有效 PNG。")
-            images.append(image)
+                overview = await page.evaluate(
+                    "async () => { await document.fonts.ready; return {width: document.documentElement.scrollWidth, height: Math.ceil(document.querySelector('.sheet').getBoundingClientRect().height)}; }"
+                )
+                width, height = overview["width"], overview["height"]
+                if (
+                    not isinstance(width, int | float)
+                    or not isinstance(height, int | float)
+                    or not math.isfinite(width)
+                    or not math.isfinite(height)
+                    or width > settings.render_width
+                    or width <= 0
+                    or height <= 0
+                    or settings.render_width * height > settings.render_max_pixels
+                ):
+                    raise StudioError(
+                        "render_limit",
+                        "人格档案尺寸无效或超出单图像素上限；档案不拆页、不截断。",
+                    )
+                image = await page.screenshot(
+                    type="png",
+                    animations="disabled",
+                    full_page=True,
+                    clip={
+                        "x": 0,
+                        "y": 0,
+                        "width": settings.render_width,
+                        "height": height,
+                    },
+                    timeout=settings.render_timeout * 1000,
+                )
+                if not isinstance(image, bytes) or not image.startswith(
+                    b"\x89PNG\r\n\x1a\n"
+                ):
+                    raise StudioError("render_failed", "浏览器没有返回有效 PNG。")
+                images.append(image)
+                if content == "metadata":
+                    return images
             await page.set_content(
                 content_html(result, settings.render_width), wait_until="load"
             )
@@ -184,7 +293,7 @@ async def render_pages(context, result: dict, settings) -> list[bytes]:
                 PAGINATE_CONTENT,
                 {
                     "height": settings.render_page_height,
-                    "maxPages": settings.render_max_pages - 1,
+                    "maxPages": settings.render_max_pages - len(images),
                 },
             )
             if "error" in layout:
@@ -195,7 +304,7 @@ async def render_pages(context, result: dict, settings) -> list[bytes]:
                 or not math.isfinite(width)
                 or not 0 < width <= settings.render_width
                 or not pages
-                or len(pages) + 1 > settings.render_max_pages
+                or len(pages) + len(images) > settings.render_max_pages
             ):
                 raise StudioError(
                     "render_limit", "正文尺寸或总页数超出上限，不截断内容。"
@@ -254,17 +363,30 @@ def delivery_actor(studio, event, result):
     return actor
 
 
-async def present(studio, event, response: dict, *, include_md: bool) -> dict:
+async def present(
+    studio, event, response: dict, *, format: str = "image", content: str = "prompt"
+) -> dict:
     result = response["data"]
     submitted = 0
     file_submitted = False
+    forwards_submitted = 0
+    forward_nodes_submitted = 0
     path = None
     sending = False
     outcome = None
     try:
         delivery_actor(studio, event, result)
-        images = await render_pages(studio.context, result, studio.settings())
-        if include_md:
+        format, content = view_options({"format": format, "content": content})
+        nodes_count = 0
+        if format == "image":
+            images = await render_pages(
+                studio.context, result, studio.settings(), content
+            )
+            messages = [
+                MessageChain([Image.fromBytes(image)], type="tool_direct_result")
+                for image in images
+            ]
+        elif format == "markdown":
             directory = Path(get_astrbot_temp_path()) / "astrbot_plugin_persona_studio"
             directory.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
@@ -277,24 +399,36 @@ async def present(studio, event, response: dict, *, include_md: bool) -> dict:
                 delete=False,
             ) as stream:
                 path = Path(stream.name)
-                stream.write(detail_markdown(result))
-        messages = [MessageChain([Image.fromBytes(image)]) for image in images]
-        if path is not None:
-            name = markdown_filename(result)
-            messages.append(MessageChain([File(name=name, file=str(path))]))
-        for index, message in enumerate(messages):
+                stream.write(detail_markdown(result, content))
+            name = markdown_filename(result, content)
+            messages = [
+                MessageChain(
+                    [File(name=name, file=str(path))], type="tool_direct_result"
+                )
+            ]
+        else:
+            message, nodes_count = forward_message(event, result, content)
+            messages = [message]
+        for message in messages:
             delivery_actor(studio, event, result)
             sending = True
             await event.send(message)
             sending = False
-            if index < len(images):
+            if format == "image":
                 submitted += 1
-            else:
+            elif format == "markdown":
                 file_submitted = True
+            else:
+                forwards_submitted += 1
+                forward_nodes_submitted += nodes_count
         delivery_actor(studio, event, result)
         response["delivery"] = {
+            "format": format,
+            "content": content,
             "images_submitted": submitted,
             "md_submitted": file_submitted,
+            "forwards_submitted": forwards_submitted,
+            "forward_nodes_submitted": forward_nodes_submitted,
             "status": "submitted_to_platform",
         }
         outcome = response
@@ -321,8 +455,12 @@ async def present(studio, event, response: dict, *, include_md: bool) -> dict:
                 "details": error.details,
             },
             "delivery": {
+                "format": format,
+                "content": content,
                 "images_submitted": submitted,
                 "md_submitted": file_submitted,
+                "forwards_submitted": forwards_submitted,
+                "forward_nodes_submitted": forward_nodes_submitted,
                 "failed_message_may_have_been_delivered": sending,
             },
             "retry_safe": False,

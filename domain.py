@@ -162,6 +162,25 @@ def check_payload(payload, allowed: set[str], required: set[str] = frozenset()) 
         )
 
 
+def view_options(payload: dict) -> tuple[str, str]:
+    if "include_md" in payload:
+        raise StudioError(
+            "invalid_payload",
+            "include_md 已移除；请使用 format=markdown 发送文件，并用 content 选择内容。",
+        )
+    output_format = payload.get("format", "image")
+    content = payload.get("content", "prompt")
+    if not isinstance(output_format, str) or output_format not in (
+        "text",
+        "image",
+        "markdown",
+    ):
+        raise StudioError("invalid_payload", "format 仅支持 text/image/markdown。")
+    if not isinstance(content, str) or content not in ("metadata", "prompt", "all"):
+        raise StudioError("invalid_payload", "content 仅支持 metadata/prompt/all。")
+    return output_format, content
+
+
 def validate_id(value, *, create: bool = False) -> str:
     if (
         not isinstance(value, str)

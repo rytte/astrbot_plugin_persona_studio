@@ -21,6 +21,58 @@ async def set_lock(env, locked=True, *, actor=None):
     )
 
 
+@pytest.mark.parametrize("family", ["manage", "versions"])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"format": "md"},
+        {"format": "TEXT"},
+        {"format": None},
+        {"format": False},
+        {"format": {}},
+        {"content": "both"},
+        {"content": None},
+        {"content": []},
+        {"include_md": True},
+        {"include_md": False},
+        {"include_md": True, "format": "markdown"},
+    ],
+)
+async def test_get_rejects_invalid_or_removed_view_options(created, family, options):
+    target = {"persona_id": "alice"} if family == "manage" else {"backup_id": "unused"}
+    response = await run(created, "get", {**target, **options}, family=family)
+    assert response["error"]["code"] == "invalid_payload"
+    if "include_md" in options:
+        assert "include_md 已移除" in response["error"]["message"]
+    created.event.send.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["list", "create", "update", "delete", "switch"])
+async def test_view_options_are_not_allowed_for_other_actions(created, action):
+    payload = {"format": "markdown"}
+    if action != "list":
+        payload["persona_id"] = "alice"
+    if action == "create":
+        payload["system_prompt"] = "prompt"
+    if action == "update":
+        payload["system_prompt"] = "new"
+    response = await run(created, action, payload)
+    assert response["error"]["code"] == "invalid_payload"
+
+
+@pytest.mark.parametrize("action", ["list", "restore", "delete"])
+async def test_view_options_are_not_allowed_for_version_writes(created, action):
+    payload = {"format": "markdown"}
+    if action == "list":
+        payload["persona_id"] = "alice"
+    else:
+        payload["backup_id"] = "unused"
+    if action == "restore":
+        payload["expected_revision"] = "unused"
+    response = await run(created, action, payload, family="versions")
+    assert response["error"]["code"] == "invalid_payload"
+
+
 async def first_backup(env):
     changed = await run(
         env, "update", {"persona_id": "alice", "system_prompt": "版本2"}

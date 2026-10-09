@@ -96,7 +96,7 @@ def fields_html(fields: list[tuple]) -> str:
     )
 
 
-def header_html(result: dict, kind: str) -> str:
+def header_html(result: dict, kind: str, *, include_metadata: bool = True) -> str:
     persona_id = html.escape(result["persona"]["persona_id"])
     snapshot = result.get("snapshot")
     revision = snapshot["revision"] if snapshot else result.get("revision", "未提供")
@@ -107,13 +107,17 @@ def header_html(result: dict, kind: str) -> str:
         '<div><div class="brand-name">人格捏造</div>'
         '<div class="brand-subtitle">PERSONA STUDIO</div></div></div>'
         f'<div class="hero"><div class="eyebrow">{kind}</div><h1>{persona_id}</h1>'
-        f'<div class="hero-meta"><span class="pill">{html.escape(version)}</span>'
-        f'<span class="pill {"locked" if locked else "open"}">{"已锁定" if locked else "未锁定"}</span>'
-        "</div></div></header>"
+        + (
+            f'<div class="hero-meta"><span class="pill">{html.escape(version)}</span>'
+            f'<span class="pill {"locked" if locked else "open"}">{"已锁定" if locked else "未锁定"}</span></div>'
+            if include_metadata
+            else ""
+        )
+        + "</div></header>"
     )
 
 
-def overview_html(result: dict, width: int) -> str:
+def metadata_fields(result: dict) -> tuple[list[tuple], list[tuple]]:
     persona = result["persona"]
     owner = result.get("owner")
     exists = result.get("exists", True)
@@ -173,7 +177,20 @@ def overview_html(result: dict, width: int) -> str:
         ("更新时间", format_time(persona.get("updated_at")), False),
         ("所在分组", persona.get("folder_id") or "未分组", False),
         ("排序位置", persona.get("sort_order", "未提供"), False),
+        (
+            "自定义错误回复",
+            persona.get("custom_error_message")
+            if persona.get("custom_error_message") is not None
+            else "未设置",
+            True,
+        ),
     ]
+    return version_fields, persona_fields
+
+
+def overview_html(result: dict, width: int) -> str:
+    persona = result["persona"]
+    version_fields, persona_fields = metadata_fields(result)
     capabilities = []
     for name, label in (("tools", "可用工具"), ("skills", "可用技能")):
         names = persona.get(name)
@@ -241,15 +258,9 @@ def content_html(result: dict, width: int) -> str:
             + "".join(dialog_html)
             + "</section>"
         )
-    error_message = persona.get("custom_error_message")
-    if error_message:
-        sections.append(
-            "<section><h2 data-heading>自定义错误回复</h2>"
-            + f'<div class="prose" data-text>{html.escape(error_message)}</div></section>'
-        )
     body = (
         '<main class="sheet" data-sheet="content">'
-        + header_html(result, "人格正文")
+        + header_html(result, "人格正文", include_metadata=False)
         + '<header class="continuation-header"><span>接上页</span></header>'
         + '<div class="content-card"><div class="flow-window"><div class="flow">'
         + "".join(sections)
