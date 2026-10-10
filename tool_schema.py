@@ -1,7 +1,12 @@
 from copy import deepcopy
 
+from .domain import ACTION_PAYLOADS, MODEL_TOOLS, StudioError
 
-def tool_parameters(family: str, settings) -> dict:
+
+def tool_parameters(name: str, settings) -> dict:
+    if name not in MODEL_TOOLS:
+        raise StudioError("invalid_tool", f"未知模型工具：{name}。")
+    family, action = MODEL_TOOLS[name]
     common = {
         "offset": {
             "type": "integer",
@@ -26,7 +31,6 @@ def tool_parameters(family: str, settings) -> dict:
         },
     }
     if family == "manage":
-        actions = ["list", "get", "create", "update", "delete", "switch"]
         names = {
             "anyOf": [
                 {
@@ -45,7 +49,7 @@ def tool_parameters(family: str, settings) -> dict:
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 255,
-                "description": "人格 ID；除 list 外必填",
+                "description": "人格 ID，必须使用实际查询到或用户指定的完整 ID",
             },
             "system_prompt": {
                 "type": "string",
@@ -69,40 +73,30 @@ def tool_parameters(family: str, settings) -> dict:
             },
         }
     else:
-        actions = ["list", "get", "restore", "delete"]
         properties = {
             **common,
             "persona_id": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 255,
-                "description": "list 时必填",
+                "description": "查询备份的人格 ID；人格已删除时仍可查询其备份",
             },
             "backup_id": {
                 "type": "string",
                 "minLength": 1,
-                "description": "get/restore/delete 时必填，只能使用查询返回的备份 ID",
+                "description": "备份 ID，只能使用查询或人格写操作返回的备份 ID，不是人格 ID",
             },
             "expected_revision": {
                 "type": "string",
                 "description": "restore 时必填，必须是最新查询返回的完整状态令牌，不是整数版本号",
             },
         }
+    allowed, required = ACTION_PAYLOADS[family][action]
     return {
         "type": "object",
         "properties": {
-            "action": {
-                "type": "string",
-                "enum": actions,
-                "description": "执行的操作；get 按 format/content 自行发送所选详情，默认仅发送提示词图片，并返回结构化详情与发送回执",
-            },
-            "payload": {
-                "type": "object",
-                "properties": properties,
-                "additionalProperties": False,
-                "description": "只提交对应 action 的参数；未知参数或不符合该 action 的参数会报错",
-            },
+            field: schema for field, schema in properties.items() if field in allowed
         },
-        "required": ["action", "payload"],
+        "required": sorted(required),
         "additionalProperties": False,
     }

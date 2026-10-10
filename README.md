@@ -1,4 +1,4 @@
-# 人格捏造 · Persona Studio
+# 人格工坊 · Persona Studio
 
 让模型帮助你捏造、编辑和切换 AstrBot 人格，支持人工锁定、历史版本回退，以及可独立选择内容的文字、图片和 Markdown 文件展示。
 
@@ -10,7 +10,7 @@
 
 本插件只使用核心已有接口，不修改主程序，也不在运行时替换人格管理器或工具执行器。
 
-将本目录作为 `data/plugins/astrbot_plugin_persona_studio` 加载，随后在插件配置中填写白名单与限额。两个模型工具的核心组件权限应允许成员进入，实际准入及人格级权限仍由插件逐次校验。
+将本目录作为 `data/plugins/astrbot_plugin_persona_studio` 加载，随后在插件配置中填写白名单与限额。模型工具的核心组件权限应允许成员进入，实际准入及人格级权限仍由插件逐次校验。
 
 ## 已接受的核心风险
 
@@ -23,7 +23,7 @@
 
 - 默认只有管理员可用；白名单用户只能管理自己通过本插件新建的人格及其版本，不能认领既有人格。
 - 身份使用平台**实例 ID**与用户 ID，不是平台类型；创建者从真实消息事件自动绑定，模型不能修改所有者或白名单。
-- 所有入口默认支持私聊和群聊；`allow_group_chat` 默认开启，设为 `false` 时仅允许私聊。两个模型工具及全部 `/ps` 命令在群聊中的鉴权与私聊一致。所有权仍绑定平台实例和真实发送者，不绑定群 ID；白名单是平台实例级授权，不是仅授权某个群。白名单变更每次调用重新读取；撤销授权后人格与备份保留。
+- 所有入口默认支持私聊和群聊；`allow_group_chat` 默认开启，设为 `false` 时仅允许私聊。模型工具及全部 `/ps` 命令在群聊中的鉴权与私聊一致。所有权仍绑定平台实例和真实发送者，不绑定群 ID；白名单是平台实例级授权，不是仅授权某个群。白名单变更每次调用重新读取；撤销授权后人格与备份保留。
 - 群聊详情、图片、转发和文件直接发送到当前群，群成员可见；开启群聊即接受这项展示风险，不自动转私聊。
 - 管理员和白名单用户均可配置内容、工具和技能：`null` 表示全部，`[]` 表示禁用，名称列表表示指定范围。创建时省略采用核心默认，更新时省略保持不变。
 - 锁定禁止修改、删除、恢复以及备份删除，管理员也不能绕过；查看和有权限的切换不受影响。
@@ -44,16 +44,20 @@
 
 ## 模型工具
 
-### persona_manage(action, payload)
+每个操作使用独立工具，参数直接提交，不再传入 `action` 或 `payload`。工具声明和执行校验共用同一份操作契约，只接受当前工具对应的字段；未知参数明确报错，并返回允许、必填、多余和缺少的字段，不忽略字段、不猜测操作、不自动重试。
 
-| action | payload | 行为 |
+旧的 `persona_manage`、`persona_versions` 工具已移除，不提供兼容别名。升级后重启 AstrBot 以重新注册工具；若人格的 `tools` 是显式名称列表，或系统提示词指定了旧工具名，需要手动替换为所需的新工具名。`tools=null` 仍表示全部可用工具，不需要修改。旧备份中的工具名称也不会自动迁移：包含已移除工具名的快照会明确拒绝恢复，可以查看历史内容后按新工具名称重新创建或更新人格，不要直接修改备份文件。
+
+### 当前人格
+
+| 工具 | 参数 | 行为 |
 | --- | --- | --- |
-| list | 可选 offset、limit | 先按权限过滤再分页 |
-| get | persona_id，可选 format、content | 默认仅发提示词图片；形式与内容独立选择 |
-| create | persona_id、system_prompt；可选内容与能力字段 | 新建并绑定真实创建者 |
-| update | persona_id、至少一个内容或能力字段 | 先保存快照，再更新指定字段 |
-| delete | persona_id | 先检查引用并保存快照，禁止强删和自动解绑 |
-| switch | persona_id | 只切换 AstrBot 分配的当前会话，保留历史，下一次新建的聊天请求生效；当前整个工具调用链不变 |
+| persona_list | 可选 offset、limit | 先按权限过滤再分页 |
+| persona_get | persona_id，可选 format、content | 默认仅发提示词图片；形式与内容独立选择 |
+| persona_create | persona_id、system_prompt；可选内容与能力字段 | 新建并绑定真实创建者 |
+| persona_update | persona_id、至少一个内容或能力字段 | 先保存快照，再更新指定字段 |
+| persona_delete | persona_id | 先检查引用并保存快照，禁止强删和自动解绑；返回 backup_id |
+| persona_switch | persona_id | 只切换 AstrBot 分配的当前会话，保留历史，下一次新建的聊天请求生效；当前整个工具调用链不变 |
 
 内容字段：`system_prompt`、`begin_dialogs`、`custom_error_message`；能力字段：`tools`、`skills`。不提供改名、任意会话 ID、发送目标或文件路径参数。未知参数明确报错。
 
@@ -63,14 +67,16 @@
 
 群聊 `switch` 沿用核心的 `unified_msg_origin`：共享群会话时切换该群当前对话，启用且支持群成员会话隔离时只切换对应成员的群内对话。不影响其他群、私聊或全局默认人格；群聊开关关闭后仍保留已经完成的切换，不自动恢复。
 
-### persona_versions(action, payload)
+### 人格备份
 
-| action | payload | 行为 |
+| 工具 | 参数 | 行为 |
 | --- | --- | --- |
-| list | persona_id，可选 offset、limit | 查询全部可见版本链的备份及当前状态 |
-| get | backup_id，可选 format、content | 历史详情使用相同查看选项，模型仍获得完整结构化原文 |
-| restore | backup_id、expected_revision | 恢复任意保留快照，产生新版本 |
-| delete | backup_id | 永久删除该备份，不删除或回退当前人格 |
+| persona_backup_list | persona_id，可选 offset、limit | 查询全部可见版本链的备份及当前状态；人格已删除时仍可查询 |
+| persona_backup_get | backup_id，可选 format、content | 历史详情使用相同查看选项，模型仍获得完整结构化原文 |
+| persona_backup_restore | backup_id、expected_revision | 恢复任意保留快照，产生新版本 |
+| persona_backup_delete | backup_id | 永久删除该备份，不删除或回退当前人格 |
+
+用户明确要求删除备份且上下文已有真实 `backup_id` 时，直接调用 `persona_backup_delete`，例如参数 `{"backup_id":"b6e4bb4a-4826-48f0-9c2f-3f4e7260e953"}`。不需要查询列表，不传 `persona_id`、`expected_revision`、`format` 或 `content`。没有明确目标时先查询并确认，不能猜测要删除哪个备份。
 
 `expected_revision` 是最新 `list/get` 返回的**不透明状态令牌**，不是旧快照的版本号；包含版本链和核心当前完整状态，恢复读取时已可见的 WebUI 修改或人格存在状态改变会使旧令牌失效，但不能阻止比较之后发生的外部并发写入。整数 `revision` 统计插件写操作，WebUI 写入不自动生成插件备份。
 
@@ -80,7 +86,7 @@
 
 ## 查看形式与内容
 
-两个工具的 `get` 共用以下 `payload` 选项，默认 `format=image`、`content=prompt`。每次只发送一种形式，不自动附加其他消息类型。
+`persona_get` 和 `persona_backup_get` 共用以下选项，默认 `format=image`、`content=prompt`。每次只发送一种形式，不自动附加其他消息类型。
 
 | 参数 | 取值 | 行为 |
 | --- | --- | --- |
@@ -91,7 +97,7 @@
 | content | prompt（默认） | 系统提示词和非空预设对话 |
 | content | all | 元数据和提示词，先元数据后提示词 |
 
-当前人格以 `persona_id` 定位，历史详情以查询返回的 `backup_id` 定位。例如 `persona_manage` 的 `get`：
+当前人格以 `persona_id` 定位，历史详情以查询返回的 `backup_id` 定位。例如 `persona_get`：
 - 默认提示词图片：`{"persona_id":"澪"}`。
 - 仅元数据图片：`{"persona_id":"澪","content":"metadata"}`。
 - 查看文字提示词（按适配器选择合并转发或普通文本）：`{"persona_id":"澪","format":"text"}`。

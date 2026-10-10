@@ -49,6 +49,7 @@ async def env(tmp_path, monkeypatch):
     from astrbot.core.persona_mgr import PersonaManager
     from astrbot.core.provider.func_tool_manager import FunctionToolManager
     from astrbot.core.star.context import Context
+    from astrbot_plugin_persona_studio.domain import MODEL_TOOLS
     from astrbot_plugin_persona_studio.service import PersonaStudio
     from astrbot_plugin_persona_studio.storage import Storage
 
@@ -68,7 +69,7 @@ async def env(tmp_path, monkeypatch):
     await manager.initialize()
     tools = FunctionToolManager()
     handler = AsyncMock(return_value="echo-result")
-    for name in ("echo", "persona_manage", "persona_versions"):
+    for name in ("echo", *MODEL_TOOLS):
         tools.func_list.append(
             FunctionTool(
                 name=name,

@@ -321,8 +321,8 @@ async def test_model_get_sends_overview_before_content(created, family):
     page.screenshot.side_effect = [PNG + b"overview", PNG + b"content"]
     plugin = PersonaStudioPlugin(created.context, created.config)
     plugin.studio = created.studio
-    handler = getattr(plugin, f"persona_{family}")
-    response = json.loads(await handler(created.event, "get", payload))
+    handler = plugin.persona_get if family == "manage" else plugin.persona_backup_get
+    response = json.loads(await handler(created.event, **payload))
     assert response["ok"], response
     assert response["delivery"]["images_submitted"] == 2
     assert not response["delivery"]["md_submitted"]
@@ -466,7 +466,9 @@ async def test_model_get_format_content_matrix(
     plugin = PersonaStudioPlugin(created.context, created.config)
     plugin.studio = created.studio
     response = json.loads(
-        await getattr(plugin, f"persona_{family}")(created.event, "get", payload)
+        await getattr(
+            plugin, "persona_get" if family == "manage" else "persona_backup_get"
+        )(created.event, **payload)
     )
     assert response["ok"], response
     assert response["delivery"]["format"] == output_format
@@ -481,6 +483,7 @@ async def test_model_get_format_content_matrix(
         documents = [call.args[0] for call in page.set_content.await_args_list]
         assert len(documents) == len(expected_sheets)
         for document, sheet in zip(documents, expected_sheets):
+            assert '<div class="brand-name">人格工坊</div>' in document
             assert f'data-sheet="{sheet}"' in document
             if sheet == "content":
                 assert 'class="hero-meta"' not in document
@@ -508,7 +511,7 @@ async def test_model_get_format_content_matrix(
         component = created.event.send.await_args.args[0].chain[0]
         assert isinstance(component, Nodes)
         assert all(
-            node.uin == "bot" and node.name == "人格捏造" for node in component.nodes
+            node.uin == "bot" and node.name == "人格工坊" for node in component.nodes
         )
         displayed = "\n".join(node.content[0].text for node in component.nodes)
         assert response["delivery"]["forwards_submitted"] == 1
@@ -556,7 +559,9 @@ async def test_default_get_sends_prompt_only(created, family):
     plugin = PersonaStudioPlugin(created.context, created.config)
     plugin.studio = created.studio
     response = json.loads(
-        await getattr(plugin, f"persona_{family}")(created.event, "get", payload)
+        await getattr(
+            plugin, "persona_get" if family == "manage" else "persona_backup_get"
+        )(created.event, **payload)
     )
     assert response["ok"], response
     assert response["delivery"]["format"] == "image"
@@ -857,7 +862,7 @@ async def test_forward_uses_native_satori_message_api(created, monkeypatch, grou
     assert payload["content"].startswith("<message forward>")
     assert payload["content"].endswith("</message>")
     assert (
-        payload["content"].count('<author id="bot" name="人格捏造"/>')
+        payload["content"].count('<author id="bot" name="人格工坊"/>')
         == (response["delivery"]["forward_nodes_submitted"])
     )
     assert "版本与权限" in payload["content"] and "系统提示词" in payload["content"]

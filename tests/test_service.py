@@ -147,6 +147,37 @@ async def test_bad_updates(created, payload):
     assert (await created.studio.current("alice"))["system_prompt"] == "版本1"
 
 
+@pytest.mark.parametrize("name", ["persona_manage", "persona_versions"])
+async def test_removed_tools_are_rejected_without_capability_fallback(created, name):
+    before = await created.studio.current("alice")
+    result = await run(created, "update", {"persona_id": "alice", "tools": [name]})
+    assert result["error"]["code"] == "invalid_capability"
+    assert name in result["error"]["message"]
+    assert not result["error"]["details"]["mutation_started"]
+    assert await created.studio.current("alice") == before
+
+
+@pytest.mark.parametrize(
+    ("action", "required"),
+    [
+        ("list", ["persona_id"]),
+        ("get", ["backup_id"]),
+        ("restore", ["backup_id", "expected_revision"]),
+        ("delete", ["backup_id"]),
+    ],
+)
+async def test_missing_version_fields_return_contract_without_writing(
+    created, action, required
+):
+    response = await run(created, action, {}, family="versions")
+    assert response["error"]["code"] == "invalid_payload"
+    details = response["error"]["details"]
+    assert details["required_fields"] == details["missing_fields"] == required
+    assert details["unexpected_fields"] == []
+    assert not details["core_written"] and not details["plugin_written"]
+    assert not details["mutation_started"]
+
+
 async def test_capability_semantics_and_omission(created):
     assert (
         await run(

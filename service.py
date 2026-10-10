@@ -9,6 +9,7 @@ from astrbot.core.db.po import Persona
 from astrbot.core.skills.skill_manager import SkillManager
 
 from .domain import (
+    ACTION_PAYLOADS,
     CONTENT_FIELDS,
     MANAGEMENT_TOOLS,
     Settings,
@@ -309,8 +310,15 @@ class PersonaStudio:
         settings: Settings,
         progress: dict,
     ) -> dict:
+        if action not in ACTION_PAYLOADS["manage"]:
+            raise StudioError(
+                "invalid_action",
+                "人格操作仅支持 list/get/create/update/delete/switch。",
+            )
+        if action == "get":
+            view_options(payload)
+        check_payload(payload, *ACTION_PAYLOADS["manage"][action])
         if action == "list":
-            check_payload(payload, {"offset", "limit"})
             offset, limit = self.pagination(payload)
             visible = []
             personas = await self.manager.get_all_personas()
@@ -334,11 +342,6 @@ class PersonaStudio:
                 "limit": limit,
             }
         if action == "create":
-            check_payload(
-                payload,
-                CONTENT_FIELDS | {"persona_id"},
-                {"persona_id", "system_prompt"},
-            )
             persona_id = validate_id(payload["persona_id"], create=True)
             validate_content(payload, settings, create=True)
             self.validate_capabilities(payload)
@@ -361,20 +364,6 @@ class PersonaStudio:
             data = persona.model_dump(mode="json")
             record = self.storage.register(persona_id, record_ref(data), actor.owner)
             return {"persona": data, "owner": actor.owner, **self.state(record, data)}
-        allowed = {
-            "get": {"persona_id", "format", "content"},
-            "update": CONTENT_FIELDS | {"persona_id"},
-            "delete": {"persona_id"},
-            "switch": {"persona_id"},
-        }
-        if action not in allowed:
-            raise StudioError(
-                "invalid_action",
-                "persona_manage 仅支持 list/get/create/update/delete/switch。",
-            )
-        if action == "get":
-            view_options(payload)
-        check_payload(payload, allowed[action], {"persona_id"})
         persona_id = validate_id(payload["persona_id"])
         persona = await self.current(persona_id)
         if persona is None:
@@ -502,8 +491,14 @@ class PersonaStudio:
         settings: Settings,
         progress: dict,
     ) -> dict:
+        if action not in ACTION_PAYLOADS["versions"]:
+            raise StudioError(
+                "invalid_action", "备份操作仅支持 list/get/restore/delete。"
+            )
+        if action == "get":
+            view_options(payload)
+        check_payload(payload, *ACTION_PAYLOADS["versions"][action])
         if action == "list":
-            check_payload(payload, {"persona_id", "offset", "limit"}, {"persona_id"})
             persona_id = validate_id(payload["persona_id"])
             offset, limit = self.pagination(payload)
             current = await self.current(persona_id)
@@ -534,24 +529,6 @@ class PersonaStudio:
                 "offset": offset,
                 "limit": limit,
             }
-        allowed = {
-            "get": {"backup_id", "format", "content"},
-            "restore": {"backup_id", "expected_revision"},
-            "delete": {"backup_id"},
-        }
-        if action not in allowed:
-            raise StudioError(
-                "invalid_action", "persona_versions 仅支持 list/get/restore/delete。"
-            )
-        if action == "get":
-            view_options(payload)
-        check_payload(
-            payload,
-            allowed[action],
-            {"backup_id", "expected_revision"}
-            if action == "restore"
-            else {"backup_id"},
-        )
         if not isinstance(payload["backup_id"], str) or not payload["backup_id"]:
             raise StudioError("invalid_payload", "backup_id 必须为非空字符串。")
         record, snapshot = self.storage.get_backup(payload["backup_id"], actor)

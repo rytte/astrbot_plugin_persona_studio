@@ -132,7 +132,7 @@ def header_html(result: dict, kind: str, *, include_metadata: bool = True) -> st
     locked = result.get("locked", False)
     return (
         '<header class="persona-header"><div class="masthead"><span class="brand-mark">PS</span>'
-        '<div><div class="brand-name">人格捏造</div>'
+        '<div><div class="brand-name">人格工坊</div>'
         '<div class="brand-subtitle">PERSONA STUDIO</div></div></div>'
         f'<div class="hero"><div class="eyebrow">{kind}</div><h1>{persona_id}</h1>'
         + (

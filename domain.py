@@ -36,7 +36,38 @@ CONTENT_FIELDS = {
     "custom_error_message",
 }
 RESERVED_IDS = {"default", "[%None]", "_chatui_default_"}
-MANAGEMENT_TOOLS = {"persona_manage", "persona_versions"}
+MODEL_TOOLS = {
+    "persona_list": ("manage", "list"),
+    "persona_get": ("manage", "get"),
+    "persona_create": ("manage", "create"),
+    "persona_update": ("manage", "update"),
+    "persona_delete": ("manage", "delete"),
+    "persona_switch": ("manage", "switch"),
+    "persona_backup_list": ("versions", "list"),
+    "persona_backup_get": ("versions", "get"),
+    "persona_backup_restore": ("versions", "restore"),
+    "persona_backup_delete": ("versions", "delete"),
+}
+MANAGEMENT_TOOLS = set(MODEL_TOOLS)
+ACTION_PAYLOADS = {
+    "manage": {
+        "list": ({"offset", "limit"}, set()),
+        "get": ({"persona_id", "format", "content"}, {"persona_id"}),
+        "create": (CONTENT_FIELDS | {"persona_id"}, {"persona_id", "system_prompt"}),
+        "update": (CONTENT_FIELDS | {"persona_id"}, {"persona_id"}),
+        "delete": ({"persona_id"}, {"persona_id"}),
+        "switch": ({"persona_id"}, {"persona_id"}),
+    },
+    "versions": {
+        "list": ({"persona_id", "offset", "limit"}, {"persona_id"}),
+        "get": ({"backup_id", "format", "content"}, {"backup_id"}),
+        "restore": (
+            {"backup_id", "expected_revision"},
+            {"backup_id", "expected_revision"},
+        ),
+        "delete": ({"backup_id"}, {"backup_id"}),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -172,14 +203,23 @@ def record_ref(persona: dict) -> str:
 def check_payload(payload, allowed: set[str], required: set[str] = frozenset()) -> None:
     if not isinstance(payload, dict):
         raise StudioError("invalid_payload", "payload 必须是 JSON 对象。")
-    if set(payload) - allowed:
+    unexpected = sorted(set(payload) - allowed)
+    missing = sorted(required - set(payload))
+    details = {
+        "allowed_fields": sorted(allowed),
+        "required_fields": sorted(required),
+        "unexpected_fields": unexpected,
+        "missing_fields": missing,
+    }
+    if unexpected:
         raise StudioError(
-            "invalid_payload", f"未知参数：{', '.join(sorted(set(payload) - allowed))}"
+            "invalid_payload",
+            f"未知参数：{', '.join(unexpected)}；请删除这些字段，不要仅修改其值。"
+            f"允许参数：{', '.join(sorted(allowed))}。",
+            details,
         )
-    if required - set(payload):
-        raise StudioError(
-            "invalid_payload", f"缺少参数：{', '.join(sorted(required - set(payload)))}"
-        )
+    if missing:
+        raise StudioError("invalid_payload", f"缺少参数：{', '.join(missing)}", details)
 
 
 def view_options(payload: dict) -> tuple[str, str]:

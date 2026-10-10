@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -6,10 +7,13 @@ import pytest
 from astrbot.api import sp
 from astrbot.core import astr_agent_tool_exec, astr_main_agent
 from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.db.po import Conversation
 from astrbot.core.provider.entities import ProviderRequest
+from astrbot_plugin_persona_studio.domain import MODEL_TOOLS, Settings
 from astrbot_plugin_persona_studio.main import PersonaStudioPlugin
+from astrbot_plugin_persona_studio.tool_schema import tool_parameters
 
 
 @pytest.mark.parametrize("path", ["main", "handoff", "full"])
@@ -140,6 +144,13 @@ async def test_plugin_initializes_without_core_patch(env, tmp_path, monkeypatch)
     try:
         assert plugin.studio.manager is env.manager
         assert plugin.maintenance_task is not None
+        for name in MODEL_TOOLS:
+            tool = env.tools.get_func(name)
+            assert "action" not in tool.parameters["properties"]
+            assert "payload" not in tool.parameters["properties"]
+            assert "失败不要自动重试" in tool.description
+        assert env.tools.get_func("persona_manage") is None
+        assert env.tools.get_func("persona_versions") is None
     finally:
         await plugin.terminate()
 
@@ -147,7 +158,7 @@ async def test_plugin_initializes_without_core_patch(env, tmp_path, monkeypatch)
 async def test_plugin_tools_and_command_dispatch(created):
     plugin = PersonaStudioPlugin(created.context, created.config)
     plugin.studio = created.studio
-    assert '"ok": true' in await plugin.persona_manage(created.event, "list", {})
+    assert '"ok": true' in await plugin.persona_list(created.event)
     message = created.native_event(text="/ps lock alice")
     replies = [reply async for reply in plugin.persona(message, "lock alice")]
     assert len(replies) == 1
@@ -159,6 +170,83 @@ async def test_plugin_tools_and_command_dispatch(created):
             {"persona_id": "alice", "system_prompt": "blocked"},
         )
     )["error"]["code"] == "persona_locked"
+
+
+@pytest.mark.parametrize("name", MODEL_TOOLS)
+async def test_individual_tools_dispatch_fixed_operations(created, name):
+    plugin = PersonaStudioPlugin(created.context, created.config)
+    plugin.dispatch = AsyncMock(return_value='{"ok": true}')
+    parameters = tool_parameters(name, Settings())
+    arguments = {field: "value" for field in parameters["required"]}
+    if name == "persona_update":
+        arguments["system_prompt"] = "new prompt"
+    tool = FunctionTool(
+        name=name,
+        description="Test",
+        parameters=parameters,
+        handler=getattr(plugin, name),
+        handler_module_path="astrbot_plugin_persona_studio.main",
+    )
+    run_context = ContextWrapper(
+        context=SimpleNamespace(context=created.context, event=created.event)
+    )
+    results = [
+        result
+        async for result in FunctionToolExecutor.execute(tool, run_context, **arguments)
+    ]
+    assert results[-1].content[0].text == '{"ok": true}'
+    family, action = MODEL_TOOLS[name]
+    plugin.dispatch.assert_awaited_once_with(created.event, family, action, arguments)
+
+
+async def test_delete_persona_then_delete_its_backup_without_mixed_parameters(created):
+    plugin = PersonaStudioPlugin(created.context, created.config)
+    plugin.studio = created.studio
+    deleted = json.loads(await plugin.persona_delete(created.event, persona_id="alice"))
+    assert deleted["ok"], deleted
+    backup_id = deleted["data"]["backup_id"]
+    arguments = {
+        "persona_id": "alice",
+        "backup_id": backup_id,
+        "content": "metadata",
+        "expected_revision": "",
+        "format": "text",
+        "limit": 100,
+        "offset": 0,
+    }
+    for revision in ("", "x", deleted["data"]["expected_revision"]):
+        invalid = json.loads(
+            await plugin.persona_backup_list(
+                created.event, **{**arguments, "expected_revision": revision}
+            )
+        )
+        assert invalid["error"]["code"] == "invalid_payload"
+        details = invalid["error"]["details"]
+        assert details["allowed_fields"] == ["limit", "offset", "persona_id"]
+        assert details["unexpected_fields"] == [
+            "backup_id",
+            "content",
+            "expected_revision",
+            "format",
+        ]
+        assert not details["core_written"] and not details["plugin_written"]
+        assert not details["mutation_started"]
+        assert "不要仅修改其值" in invalid["error"]["message"]
+    listed = json.loads(
+        await plugin.persona_backup_list(created.event, persona_id="alice")
+    )
+    assert [item["backup_id"] for item in listed["data"]["items"]] == [backup_id]
+    removed = json.loads(
+        await plugin.persona_backup_delete(created.event, backup_id=backup_id)
+    )
+    assert removed["ok"], removed
+    assert removed["data"]["deleted"] and not removed["data"]["undoable"]
+    assert await created.studio.current("alice") is None
+    listed = json.loads(
+        await plugin.persona_backup_list(created.event, persona_id="alice")
+    )
+    assert listed["data"]["items"] == []
+    created.event.send.assert_not_called()
 
 
 async def test_explicit_builtin_tool_stays_available(created, monkeypatch):

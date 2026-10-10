@@ -213,7 +213,7 @@ def forward_message(event, result: dict, content: str) -> tuple[MessageChain, in
             heading = f"{title}（{index}/{len(chunks)}）" if len(chunks) > 1 else title
             nodes.append(
                 Node(
-                    name="人格捏造",
+                    name="人格工坊",
                     uin=str(bot_id),
                     content=[Plain(f"{heading}\n\n{chunk}")],
                 )
