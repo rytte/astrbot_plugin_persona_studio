@@ -90,6 +90,8 @@ async def first_backup(env):
     ],
 )
 async def test_identity_gate(env, event_kwargs, code):
+    if event_kwargs.get("group"):
+        env.config["allow_group_chat"] = False
     response = await run(env, "list", {}, actor=env.native_event(**event_kwargs))
     assert response["error"]["code"] == code
 

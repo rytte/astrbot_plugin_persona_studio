@@ -418,9 +418,15 @@ async def test_revocation_while_rendering_does_not_return_raw_data(created):
 @pytest.mark.parametrize("family", ["manage", "versions"])
 @pytest.mark.parametrize("output_format", ["text", "image", "markdown"])
 @pytest.mark.parametrize("content", ["metadata", "prompt", "all"])
+@pytest.mark.parametrize("group", [False, True])
 async def test_model_get_format_content_matrix(
-    created, tmp_path, monkeypatch, family, output_format, content
+    created, tmp_path, monkeypatch, family, output_format, content, group
 ):
+    if group:
+        created.config["allow_group_chat"] = True
+        created.event = created.native_event(group=True)
+        created.event.message_obj.group_id = "test-group"
+        created.event.session_id = "test-group"
     await created.manager.update_persona(
         "alice", custom_error_message="META_ERROR", tools=None, skills=[]
     )
@@ -608,11 +614,20 @@ async def test_forward_node_limit_does_not_send_partial_text(created, monkeypatc
     created.event.send.assert_not_called()
 
 
-async def test_forward_uses_native_private_forward_api(created):
+@pytest.mark.parametrize("group", [False, True])
+async def test_forward_uses_native_current_chat_forward_api(
+    created, monkeypatch, group
+):
+    from astrbot.api.event import AstrMessageEvent
     from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
         AiocqhttpMessageEvent,
     )
 
+    if group:
+        created.config["allow_group_chat"] = True
+        created.event = created.native_event(group=True)
+        created.event.message_obj.group_id = "test-group"
+        created.event.session_id = "user_test-group"
     created.event.platform_meta.name = "aiocqhttp"
     response = await rendering.present(
         created.studio,
@@ -624,17 +639,23 @@ async def test_forward_uses_native_private_forward_api(created):
     assert response["ok"], response
     bot = SimpleNamespace(call_action=AsyncMock())
     message = created.event.send.await_args.args[0]
-    await AiocqhttpMessageEvent.send_message(
-        bot=bot,
-        event={"self_id": "bot"},
-        message_chain=message,
-        is_group=False,
-        session_id="user",
+    native = AiocqhttpMessageEvent(
+        created.event.message_str,
+        created.event.message_obj,
+        created.event.platform_meta,
+        created.event.session_id,
+        bot,
     )
+    monkeypatch.setattr(AstrMessageEvent, "send", AsyncMock())
+    await native.send(message)
     bot.call_action.assert_awaited_once()
     call = bot.call_action.await_args
-    assert call.args == ("send_private_forward_msg",)
-    assert call.kwargs["user_id"] == "user"
+    assert call.args == (
+        "send_group_forward_msg" if group else "send_private_forward_msg",
+    )
+    assert call.kwargs["group_id" if group else "user_id"] == (
+        "test-group" if group else "user"
+    )
     assert (
         len(call.kwargs["messages"]) == response["delivery"]["forward_nodes_submitted"]
     )
@@ -642,16 +663,23 @@ async def test_forward_uses_native_private_forward_api(created):
 
 
 @pytest.mark.parametrize("output_format", ["image", "text", "markdown"])
+@pytest.mark.parametrize("group", [False, True])
 async def test_revocation_after_delivery_hides_structured_data(
-    created, tmp_path, monkeypatch, output_format
+    created, tmp_path, monkeypatch, output_format, group
 ):
+    if group:
+        created.config["allow_group_chat"] = True
+        created.event = created.native_event(group=True)
     if output_format == "image":
         fake_browser(created, height=450)
     created.event.platform_meta.name = "aiocqhttp"
     monkeypatch.setattr(rendering, "get_astrbot_temp_path", lambda: str(tmp_path))
 
     async def revoke(message):
-        created.config["whitelist"] = []
+        if group:
+            created.config["allow_group_chat"] = False
+        else:
+            created.config["whitelist"] = []
 
     created.event.send = AsyncMock(side_effect=revoke)
     response = await rendering.present(

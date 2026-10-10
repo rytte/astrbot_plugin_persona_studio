@@ -4,6 +4,8 @@ import hashlib
 import json
 from dataclasses import dataclass, fields
 
+from astrbot.api.platform import MessageType
+
 
 class StudioError(Exception):
     def __init__(self, code: str, message: str, details: dict | None = None):
@@ -50,6 +52,7 @@ class Actor:
 
 @dataclass(frozen=True)
 class Settings:
+    allow_group_chat: bool = True
     whitelist: tuple[tuple[str, str], ...] = ()
     max_personas_per_user: int = 20
     max_personas_total: int = 200
@@ -72,6 +75,9 @@ class Settings:
                 "invalid_config", f"未知配置字段：{', '.join(sorted(unknown))}"
             )
         raw = dict(config)
+        allow_group_chat = raw.pop("allow_group_chat", True)
+        if type(allow_group_chat) is not bool:
+            raise StudioError("invalid_config", "allow_group_chat 必须为布尔值。")
         whitelist = raw.pop("whitelist", [])
         if not isinstance(whitelist, list):
             raise StudioError("invalid_config", "whitelist 必须为用户模板列表。")
@@ -103,7 +109,9 @@ class Settings:
         for name, value in raw.items():
             if type(value) is not int or value < 1:
                 raise StudioError("invalid_config", f"{name} 必须为正整数。")
-        settings = cls(whitelist=tuple(identities), **raw)
+        settings = cls(
+            allow_group_chat=allow_group_chat, whitelist=tuple(identities), **raw
+        )
         if (
             not 480 <= settings.render_width <= 1600
             or not 600 <= settings.render_page_height <= 2400
@@ -124,8 +132,20 @@ class Settings:
 
 
 def identify(event, settings: Settings) -> Actor:
-    if not event or not event.is_private_chat() or event.get_platform_name() == "cron":
-        raise StudioError("private_only", "人格管理仅接受真实用户的当前私聊上下文。")
+    if (
+        not event
+        or event.get_platform_name() == "cron"
+        or event.get_message_type()
+        not in {MessageType.FRIEND_MESSAGE, MessageType.GROUP_MESSAGE}
+    ):
+        raise StudioError(
+            "invalid_context", "人格管理仅接受真实用户的当前私聊或群聊上下文。"
+        )
+    if not event.is_private_chat() and not settings.allow_group_chat:
+        raise StudioError(
+            "private_only",
+            "群聊使用未开放，请在私聊中操作，或由管理员开启 allow_group_chat。",
+        )
     platform_id, user_id = event.get_platform_id(), event.get_sender_id()
     if any(
         not isinstance(value, str) or not value or value.strip() != value

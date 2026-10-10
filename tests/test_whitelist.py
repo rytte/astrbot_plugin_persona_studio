@@ -105,6 +105,16 @@ async def test_noop_does_not_save(whitelist_env, monkeypatch, action, user_id):
     save.assert_not_called()
 
 
+async def test_group_command_is_allowed_by_default(whitelist_env):
+    env = whitelist_env
+    event = env.native_event(
+        "admin", admin=True, group=True, text="/ps whitelist add new"
+    )
+    response = await change(env, "add", "new", event=event)
+    assert response["ok"], response
+    assert ("platform", "new") in env.studio.settings().whitelist
+
+
 async def test_identity_is_scoped_to_current_instance(whitelist_env):
     env = whitelist_env
     event = env.native_event(
@@ -143,11 +153,16 @@ async def test_restricted_callers_cannot_change_whitelist(whitelist_env, case):
     )
     if case == "cron":
         event.platform_meta.name = "cron"
+    elif case == "group":
+        env.config["allow_group_chat"] = False
     elif case == "api_restricted":
         event.set_extra("_api_key_allow_admin_role", False)
     previous = dict(env.config)
     response = await change(env, "add", "new", event=event)
-    assert response["error"]["code"] in {"private_only", "forbidden"}
+    expected = {"group": "private_only", "cron": "invalid_context"}.get(
+        case, "forbidden"
+    )
+    assert response["error"]["code"] == expected
     assert env.config == previous
 
 
@@ -286,12 +301,14 @@ async def test_audit_failure_reports_persisted_change(whitelist_env, monkeypatch
 
 
 @pytest.mark.parametrize("action,user_id", [("add", "new"), ("remove", "user")])
-async def test_native_command_filter_dispatch(whitelist_env, action, user_id):
+@pytest.mark.parametrize("group", [False, True])
+async def test_native_command_filter_dispatch(whitelist_env, action, user_id, group):
     env = whitelist_env
+    env.config["allow_group_chat"] = group
     plugin = PersonaStudioPlugin(env.context, env.config)
     plugin.studio = env.studio
     event = env.native_event(
-        "admin", admin=True, text=f"/ps whitelist {action} {user_id}"
+        "admin", admin=True, group=group, text=f"/ps whitelist {action} {user_id}"
     )
     event.message_str = event.message_obj.message_str[1:]
     event.is_at_or_wake_command = True

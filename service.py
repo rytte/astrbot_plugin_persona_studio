@@ -417,10 +417,10 @@ class PersonaStudio:
             if conversation is None:
                 raise StudioError(
                     "no_current_conversation",
-                    "当前私聊没有可更新的对话，不会自动新建或重置。",
+                    "当前会话没有可更新的对话，不会自动新建或重置。",
                 )
             if conversation.user_id != event.unified_msg_origin:
-                raise StudioError("conversation_forbidden", "当前对话不属于此私聊。")
+                raise StudioError("conversation_forbidden", "当前对话不属于此会话。")
             if (
                 await manager.get_curr_conversation_id(event.unified_msg_origin)
                 != conversation_id
