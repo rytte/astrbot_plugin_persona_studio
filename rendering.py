@@ -15,6 +15,8 @@ from .templates import content_html, metadata_fields, overview_html
 
 FORWARD_NODE_CHARS = 4000
 FORWARD_MAX_NODES = 100
+FORWARD_PLATFORMS = frozenset({"aiocqhttp", "satori"})
+TEXT_MESSAGE_CHARS = 2000
 
 PAGINATE_CONTENT = r"""
 async ({height, maxPages}) => {
@@ -190,11 +192,6 @@ def split_text(text: str, limit: int) -> list[str]:
 
 def forward_message(event, result: dict, content: str) -> tuple[MessageChain, int]:
     _, content = view_options({"content": content})
-    if event.get_platform_name() != "aiocqhttp":
-        raise StudioError(
-            "forward_unavailable",
-            "文字合并转发仅支持 OneBot/Aiocqhttp；请选择 image 或 markdown，不会自动改发普通文字。",
-        )
     bot_id = event.get_self_id()
     if not bot_id:
         raise StudioError("invalid_identity", "缺少机器人账号 ID，不能发送合并转发。")
@@ -216,6 +213,17 @@ def forward_message(event, result: dict, content: str) -> tuple[MessageChain, in
                     f"合并转发超过 {FORWARD_MAX_NODES} 个节点，未发送截断内容；请选择 markdown。",
                 )
     return MessageChain([Nodes(nodes)], type="tool_direct_result"), len(nodes)
+
+
+def plain_messages(result: dict, content: str) -> list[MessageChain]:
+    _, content = view_options({"content": content})
+    text = "\n\n".join(
+        f"{title}\n\n{body}" for title, body in text_sections(result, content)
+    )
+    return [
+        MessageChain([Plain(chunk)], type="tool_direct_result")
+        for chunk in split_text(text, TEXT_MESSAGE_CHARS)
+    ]
 
 
 async def render_pages(
@@ -369,6 +377,7 @@ async def present(
     result = response["data"]
     submitted = 0
     file_submitted = False
+    texts_submitted = 0
     forwards_submitted = 0
     forward_nodes_submitted = 0
     path = None
@@ -406,9 +415,11 @@ async def present(
                     [File(name=name, file=str(path))], type="tool_direct_result"
                 )
             ]
-        else:
+        elif event.get_platform_name() in FORWARD_PLATFORMS:
             message, nodes_count = forward_message(event, result, content)
             messages = [message]
+        else:
+            messages = plain_messages(result, content)
         for message in messages:
             delivery_actor(studio, event, result)
             sending = True
@@ -418,15 +429,18 @@ async def present(
                 submitted += 1
             elif format == "markdown":
                 file_submitted = True
-            else:
+            elif nodes_count:
                 forwards_submitted += 1
                 forward_nodes_submitted += nodes_count
+            else:
+                texts_submitted += 1
         delivery_actor(studio, event, result)
         response["delivery"] = {
             "format": format,
             "content": content,
             "images_submitted": submitted,
             "md_submitted": file_submitted,
+            "texts_submitted": texts_submitted,
             "forwards_submitted": forwards_submitted,
             "forward_nodes_submitted": forward_nodes_submitted,
             "status": "submitted_to_platform",
@@ -459,6 +473,7 @@ async def present(
                 "content": content,
                 "images_submitted": submitted,
                 "md_submitted": file_submitted,
+                "texts_submitted": texts_submitted,
                 "forwards_submitted": forwards_submitted,
                 "forward_nodes_submitted": forward_nodes_submitted,
                 "failed_message_may_have_been_delivered": sending,

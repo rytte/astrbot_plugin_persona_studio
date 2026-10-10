@@ -42,6 +42,15 @@ def test_parameters_are_valid_json_schema(family):
             jsonschema.validate({"action": "get", "payload": payload}, schema)
 
 
+@pytest.mark.parametrize("family", ["manage", "versions"])
+def test_text_format_description_explains_platform_routing(family):
+    schema = tool_parameters(family, Settings())
+    description = schema["properties"]["payload"]["properties"]["format"]["description"]
+    assert "OneBot/Aiocqhttp" in description
+    assert "Satori" in description and "合并转发" in description
+    assert "其他适配器发送普通文本" in description
+
+
 def test_gemini_payload_has_fields_and_nullable_capabilities():
     schema = tool_parameters("manage", Settings())
     tool = FunctionTool(name="persona_manage", description="Manage", parameters=schema)

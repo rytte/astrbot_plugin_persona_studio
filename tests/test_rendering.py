@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from astrbot.api.message_components import Image, Nodes
+from astrbot.api.message_components import Image, Nodes, Plain
 from astrbot_plugin_persona_studio import rendering
 from astrbot_plugin_persona_studio.domain import Settings, StudioError
 from astrbot_plugin_persona_studio.main import PersonaStudioPlugin
@@ -419,8 +419,9 @@ async def test_revocation_while_rendering_does_not_return_raw_data(created):
 @pytest.mark.parametrize("output_format", ["text", "image", "markdown"])
 @pytest.mark.parametrize("content", ["metadata", "prompt", "all"])
 @pytest.mark.parametrize("group", [False, True])
+@pytest.mark.parametrize("platform", ["aiocqhttp", "satori", "telegram"])
 async def test_model_get_format_content_matrix(
-    created, tmp_path, monkeypatch, family, output_format, content, group
+    created, tmp_path, monkeypatch, family, output_format, content, group, platform
 ):
     if group:
         created.config["allow_group_chat"] = True
@@ -441,7 +442,7 @@ async def test_model_get_format_content_matrix(
         assert updated["ok"], updated
         payload = {"backup_id": updated["data"]["backup_id"]}
     payload.update({"format": output_format, "content": content})
-    created.event.platform_meta.name = "aiocqhttp"
+    created.event.platform_meta.name = platform
     monkeypatch.setattr(rendering, "get_astrbot_temp_path", lambda: str(tmp_path))
     captured_files = []
 
@@ -499,7 +500,7 @@ async def test_model_get_format_content_matrix(
         assert response["delivery"]["forwards_submitted"] == 0
         assert created.event.send.await_count == 1
         assert not list(tmp_path.rglob("*.md"))
-    else:
+    elif platform in {"aiocqhttp", "satori"}:
         assert created.event.send.await_count == 1
         component = created.event.send.await_args.args[0].chain[0]
         assert isinstance(component, Nodes)
@@ -511,6 +512,23 @@ async def test_model_get_format_content_matrix(
         assert response["delivery"]["forward_nodes_submitted"] == len(component.nodes)
         assert response["delivery"]["images_submitted"] == 0
         assert not response["delivery"]["md_submitted"]
+    else:
+        components = [
+            call.args[0].chain[0] for call in created.event.send.await_args_list
+        ]
+        assert components and all(
+            isinstance(component, Plain) for component in components
+        )
+        displayed = "".join(component.text for component in components)
+        assert response["delivery"]["forwards_submitted"] == 0
+        assert response["delivery"]["forward_nodes_submitted"] == 0
+        assert response["delivery"]["images_submitted"] == 0
+        assert not response["delivery"]["md_submitted"]
+    assert response["delivery"]["texts_submitted"] == (
+        created.event.send.await_count
+        if output_format == "text" and platform == "telegram"
+        else 0
+    )
     assert ("版本与权限" in displayed) == (content in {"metadata", "all"})
     assert ("META_ERROR" in displayed) == (content in {"metadata", "all"})
     assert ("系统提示词" in displayed) == (content in {"prompt", "all"})
@@ -572,19 +590,149 @@ async def test_paginated_all_images_preserve_order(created):
     assert 'data-sheet="content"' in page.set_content.call_args_list[1].args[0]
 
 
-async def test_text_requires_forward_capable_platform(created):
+@pytest.mark.parametrize(
+    "platform",
+    [
+        "dingtalk",
+        "discord",
+        "kook",
+        "lark",
+        "line",
+        "mattermost",
+        "misskey",
+        "qqofficial",
+        "qqofficial_webhook",
+        "slack",
+        "telegram",
+        "webchat",
+        "wecom",
+        "wecom_ai_bot",
+        "weixin_oc",
+        "weixin_official_account",
+        "custom",
+    ],
+)
+async def test_text_uses_plain_messages_on_other_platforms(created, platform):
+    created.event.platform_meta.name = platform
     response = await rendering.present(
         created.studio, created.event, await detail(created), format="text"
     )
-    assert response["error"]["code"] == "forward_unavailable"
+    assert response["ok"], response
     assert response["delivery"]["forwards_submitted"] == 0
-    created.event.send.assert_not_called()
+    assert response["delivery"]["forward_nodes_submitted"] == 0
+    assert response["delivery"]["texts_submitted"] == 1
+    created.event.send.assert_awaited_once()
+    message = created.event.send.await_args.args[0]
+    assert message.type == "tool_direct_result"
+    assert len(message.chain) == 1 and isinstance(message.chain[0], Plain)
+    assert "系统提示词\n\n版本1" in message.chain[0].text
 
 
-async def test_forward_chunks_preserve_all_prompt_text(created):
+async def test_plain_text_chunks_preserve_all_prompt_text(created, monkeypatch):
     prompt = "首行\n\n" + "完整原文，中文与换行不能丢失。" * 900 + "\n结尾"
     await created.manager.update_persona("alice", system_prompt=prompt)
-    created.event.platform_meta.name = "aiocqhttp"
+    created.event.platform_meta.name = "discord"
+    monkeypatch.setattr(rendering, "FORWARD_MAX_NODES", 1)
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), format="text"
+    )
+    assert response["ok"], response
+    messages = [call.args[0] for call in created.event.send.await_args_list]
+    assert len(messages) > 1
+    assert all(
+        message.type == "tool_direct_result"
+        and len(message.chain) == 1
+        and isinstance(message.chain[0], Plain)
+        and len(message.chain[0].text) <= rendering.TEXT_MESSAGE_CHARS
+        for message in messages
+    )
+    assert "".join(message.chain[0].text for message in messages) == (
+        f"系统提示词\n\n{prompt}\n\n"
+        "预设对话 · 第 1 轮 · 用户\n\n你好\n\n"
+        "预设对话 · 第 1 轮 · 助手\n\n你好呀"
+    )
+    assert response["delivery"]["texts_submitted"] == len(messages)
+    assert response["delivery"]["forwards_submitted"] == 0
+    assert response["delivery"]["forward_nodes_submitted"] == 0
+
+
+@pytest.mark.parametrize("platform", ["aiocqhttp", "satori", "telegram"])
+async def test_only_forward_text_requires_bot_id(created, platform):
+    created.event.platform_meta.name = platform
+    created.event.message_obj.self_id = ""
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), format="text"
+    )
+    if platform == "telegram":
+        assert response["ok"], response
+        assert response["delivery"]["texts_submitted"] == 1
+        created.event.send.assert_awaited_once()
+    else:
+        assert response["error"]["code"] == "invalid_identity"
+        assert response["delivery"]["texts_submitted"] == 0
+        created.event.send.assert_not_called()
+
+
+async def test_plain_text_send_failure_reports_partial_without_retry(created):
+    await created.manager.update_persona("alice", system_prompt="完整原文" * 2000)
+    created.event.platform_meta.name = "telegram"
+    created.event.send.side_effect = [None, RuntimeError("platform failed")]
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), format="text"
+    )
+    assert response["error"]["code"] == "delivery_failed"
+    assert not response["retry_safe"]
+    assert response["delivery"]["texts_submitted"] == 1
+    assert response["delivery"]["forwards_submitted"] == 0
+    assert response["delivery"]["failed_message_may_have_been_delivered"]
+    assert created.event.send.await_count == 2
+
+
+@pytest.mark.parametrize("group", [False, True])
+async def test_plain_text_revocation_stops_remaining_messages(created, group):
+    if group:
+        created.config["allow_group_chat"] = True
+        created.event = created.native_event(group=True)
+    await created.manager.update_persona("alice", system_prompt="完整原文" * 2000)
+    created.event.platform_meta.name = "telegram"
+
+    async def revoke(message):
+        if group:
+            created.config["allow_group_chat"] = False
+        else:
+            created.config["whitelist"] = []
+
+    created.event.send.side_effect = revoke
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), format="text"
+    )
+    assert response["error"]["code"] == ("private_only" if group else "forbidden")
+    assert "data" not in response and not response["retry_safe"]
+    assert response["delivery"]["texts_submitted"] == 1
+    assert response["delivery"]["forwards_submitted"] == 0
+    created.event.send.assert_awaited_once()
+
+
+@pytest.mark.parametrize("platform", ["aiocqhttp", "satori"])
+async def test_forward_send_failure_does_not_retry_as_plain_text(created, platform):
+    created.event.platform_meta.name = platform
+    created.event.send.side_effect = RuntimeError("platform failed")
+    response = await rendering.present(
+        created.studio, created.event, await detail(created), format="text"
+    )
+    assert response["error"]["code"] == "delivery_failed"
+    assert not response["retry_safe"]
+    assert response["delivery"]["texts_submitted"] == 0
+    assert response["delivery"]["forwards_submitted"] == 0
+    created.event.send.assert_awaited_once()
+    assert isinstance(created.event.send.await_args.args[0].chain[0], Nodes)
+
+
+@pytest.mark.parametrize("platform", ["aiocqhttp", "satori"])
+async def test_forward_chunks_preserve_all_prompt_text(created, platform):
+    prompt = "首行\n\n" + "完整原文，中文与换行不能丢失。" * 900 + "\n结尾"
+    await created.manager.update_persona("alice", system_prompt=prompt)
+    created.event.platform_meta.name = platform
     response = await rendering.present(
         created.studio, created.event, await detail(created), format="text"
     )
@@ -603,13 +751,17 @@ async def test_forward_chunks_preserve_all_prompt_text(created):
     )
 
 
-async def test_forward_node_limit_does_not_send_partial_text(created, monkeypatch):
-    created.event.platform_meta.name = "aiocqhttp"
+@pytest.mark.parametrize("platform", ["aiocqhttp", "satori"])
+async def test_forward_node_limit_does_not_send_partial_text(
+    created, monkeypatch, platform
+):
+    created.event.platform_meta.name = platform
     monkeypatch.setattr(rendering, "FORWARD_MAX_NODES", 1)
     response = await rendering.present(
         created.studio, created.event, await detail(created), format="text"
     )
     assert response["error"]["code"] == "forward_limit"
+    assert response["delivery"]["texts_submitted"] == 0
     assert response["delivery"]["forward_nodes_submitted"] == 0
     created.event.send.assert_not_called()
 
@@ -662,17 +814,64 @@ async def test_forward_uses_native_current_chat_forward_api(
     assert all(node["data"]["user_id"] == "bot" for node in call.kwargs["messages"])
 
 
+@pytest.mark.parametrize("group", [False, True])
+async def test_forward_uses_native_satori_message_api(created, monkeypatch, group):
+    from astrbot.api.event import AstrMessageEvent
+    from astrbot.core.platform.sources.satori.satori_event import SatoriPlatformEvent
+
+    if group:
+        created.config["allow_group_chat"] = True
+        created.event = created.native_event(group=True)
+        created.event.message_obj.group_id = "test-group"
+        created.event.session_id = "test-group"
+    created.event.platform_meta.name = "satori"
+    response = await rendering.present(
+        created.studio,
+        created.event,
+        await detail(created),
+        format="text",
+        content="all",
+    )
+    assert response["ok"], response
+    adapter = SimpleNamespace(
+        send_http_request=AsyncMock(return_value=[{"id": "sent"}])
+    )
+    message = created.event.send.await_args.args[0]
+    native = SatoriPlatformEvent(
+        created.event.message_str,
+        created.event.message_obj,
+        created.event.platform_meta,
+        created.event.session_id,
+        adapter,
+    )
+    monkeypatch.setattr(AstrMessageEvent, "send", AsyncMock())
+    await native.send(message)
+    adapter.send_http_request.assert_awaited_once()
+    call = adapter.send_http_request.await_args
+    assert call.args[:2] == ("POST", "/message.create")
+    payload = call.args[2]
+    assert payload["channel_id"] == ("test-group" if group else "user")
+    assert payload["content"].startswith("<message forward>")
+    assert payload["content"].endswith("</message>")
+    assert (
+        payload["content"].count('<author id="bot" name="人格捏造"/>')
+        == (response["delivery"]["forward_nodes_submitted"])
+    )
+    assert "版本与权限" in payload["content"] and "系统提示词" in payload["content"]
+
+
 @pytest.mark.parametrize("output_format", ["image", "text", "markdown"])
 @pytest.mark.parametrize("group", [False, True])
+@pytest.mark.parametrize("platform", ["aiocqhttp", "satori", "telegram"])
 async def test_revocation_after_delivery_hides_structured_data(
-    created, tmp_path, monkeypatch, output_format, group
+    created, tmp_path, monkeypatch, output_format, group, platform
 ):
     if group:
         created.config["allow_group_chat"] = True
         created.event = created.native_event(group=True)
     if output_format == "image":
         fake_browser(created, height=450)
-    created.event.platform_meta.name = "aiocqhttp"
+    created.event.platform_meta.name = platform
     monkeypatch.setattr(rendering, "get_astrbot_temp_path", lambda: str(tmp_path))
 
     async def revoke(message):

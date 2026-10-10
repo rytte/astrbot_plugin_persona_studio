@@ -17,7 +17,7 @@ def tool_parameters(family: str, settings) -> dict:
         "format": {
             "type": "string",
             "enum": ["text", "image", "markdown"],
-            "description": "仅 get：text 为合并转发文字（仅 OneBot/Aiocqhttp），image 为图片（默认），markdown 为 MD 文件；每次仅发送一种形式",
+            "description": "仅 get：text 在 OneBot/Aiocqhttp 与 Satori 使用合并转发，其他适配器发送普通文本；image 为图片（默认），markdown 为 MD 文件；每次仅发送一种形式",
         },
         "content": {
             "type": "string",
