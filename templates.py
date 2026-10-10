@@ -4,6 +4,8 @@ import html
 import re
 from datetime import datetime, timezone
 
+from markdown_it import MarkdownIt
+
 PAGE_CSS = """
 *{box-sizing:border-box;}
 html,body{margin:0;padding:0;background:#f4f3f9;color:#283047;}
@@ -49,7 +51,33 @@ dd{margin:0;font-size:18px;line-height:27px;color:#3a3c4d;overflow-wrap:anywhere
 .flow-window{overflow:hidden;}
 .flow section+section{margin-top:32px;padding-top:28px;border-top:1px solid #eeecf2;}
 .flow h2{margin-bottom:18px;}
-.prose{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;font-family:inherit;font-size:21px;line-height:34px;color:#414355;}
+.prose{margin:0;white-space:normal;overflow-wrap:anywhere;word-break:normal;font-family:inherit;font-size:21px;line-height:34px;color:#414355;}
+.prose p{margin:0 0 16px;}
+.prose :is(h1,h2,h3,h4,h5,h6){display:block;margin:24px 0 12px;line-height:1.5;letter-spacing:0;color:#55436f;}
+.prose h1{font-size:30px;}
+.prose h2{font-size:27px;}
+.prose h2::before{display:none;content:none;}
+.prose h3{font-size:24px;}
+.prose :is(h4,h5,h6){font-size:21px;}
+.prose :is(ul,ol){margin:0 0 16px;padding-left:1.6em;}
+.prose li+li{margin-top:6px;}
+.prose li>p{margin-bottom:8px;}
+.prose li>:is(ul,ol){margin-top:6px;margin-bottom:0;}
+.prose li::marker{color:#9784af;}
+.prose blockquote{margin:0 0 18px;padding:12px 18px;border-left:4px solid #b19bc9;background:#f7f4fb;border-radius:0 8px 8px 0;color:#70617f;}
+.prose blockquote>:last-child{margin-bottom:0;}
+.prose code{padding:2px 5px;border-radius:4px;background:#efedf5;color:#725a8d;font-family:"Cascadia Code",Consolas,"SFMono-Regular",monospace;font-size:.86em;box-decoration-break:clone;-webkit-box-decoration-break:clone;}
+.prose pre{margin:0 0 18px;padding:16px 18px;border:1px solid #e6e1ef;border-radius:10px;background:#f6f4f9;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:4;}
+.prose pre code{padding:0;border-radius:0;background:none;color:#4d455c;white-space:inherit;}
+.prose table{width:100%;table-layout:fixed;border-collapse:collapse;margin:0 0 18px;font-size:18px;line-height:29px;}
+.prose :is(th,td){padding:10px 12px;border:1px solid #e4dfeb;vertical-align:top;overflow-wrap:anywhere;}
+.prose th{background:#eee8f6;color:#66527f;font-weight:700;}
+.prose tbody tr:nth-child(even){background:#faf8fc;}
+.prose hr{margin:24px 0;border:0;border-top:1px solid #e5dfed;}
+.prose a{color:#7860a2;text-decoration:underline;text-underline-offset:3px;}
+.prose .image-label{color:#93889f;font-size:.9em;}
+.prose>:first-child{margin-top:0;}
+.prose>:last-child{margin-bottom:0;}
 .prompt-heading{font-weight:700;color:#705a91;}
 .dialog+.dialog{margin-top:20px;}
 .dialog-role{display:flex;align-items:center;gap:9px;margin-bottom:10px;font-size:14px;line-height:22px;color:#8f819f;}
@@ -225,16 +253,34 @@ def overview_html(result: dict, width: int) -> str:
     return document(body, width)
 
 
+def render_prompt_text(renderer, tokens, index, options, env) -> str:
+    text = tokens[index].content
+    starts_line = index == 0 or tokens[index - 1].type in {"softbreak", "hardbreak"}
+    ends_line = index == len(tokens) - 1 or tokens[index + 1].type in {
+        "softbreak",
+        "hardbreak",
+    }
+    if starts_line and ends_line and re.fullmatch(r"\s*【[^】\n]{1,100}】\s*", text):
+        return f'<span class="prompt-heading" data-prompt-heading>{html.escape(text)}</span>'
+    return renderer.text(tokens, index, options, env)
+
+
+def render_image_label(renderer, tokens, index, options, env) -> str:
+    label = renderer.renderInlineAsText(tokens[index].children or [], options, env)
+    return (
+        f'<span class="image-label">[图片未加载：{html.escape(label or "图片")}]</span>'
+    )
+
+
+PROMPT_MARKDOWN = MarkdownIt("commonmark", {"html": False, "breaks": True}).enable(
+    ["table", "strikethrough"]
+)
+PROMPT_MARKDOWN.add_render_rule("text", render_prompt_text)
+PROMPT_MARKDOWN.add_render_rule("image", render_image_label)
+
+
 def prompt_html(text: str) -> str:
-    lines = []
-    for line in text.split("\n"):
-        escaped = html.escape(line)
-        if re.fullmatch(r"\s*【[^】\n]{1,100}】\s*", line):
-            escaped = (
-                f'<span class="prompt-heading" data-prompt-heading>{escaped}</span>'
-            )
-        lines.append(escaped)
-    return "\n".join(lines)
+    return PROMPT_MARKDOWN.render(text)
 
 
 def content_html(result: dict, width: int) -> str:
@@ -251,7 +297,7 @@ def content_html(result: dict, width: int) -> str:
             kind = "user" if index % 2 == 0 else "assistant"
             dialog_html.append(
                 f'<div class="dialog {kind}"><div class="dialog-role" data-heading><span class="role-dot"></span>第 {index // 2 + 1} 轮 · {role}</div>'
-                f'<div class="prose" data-text>{html.escape(text)}</div></div>'
+                f'<div class="prose" data-text>{prompt_html(text)}</div></div>'
             )
         sections.append(
             "<section><h2 data-heading>预设对话</h2>"

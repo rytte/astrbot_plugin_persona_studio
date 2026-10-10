@@ -1,8 +1,6 @@
 import asyncio
-import html
 import io
 import json
-import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -192,12 +190,17 @@ async def test_content_groups_prompt_and_dialogs(created):
     assert "归属用户" not in document and "人格信息与能力" not in document
 
 
-def test_prompt_heading_style_preserves_raw_text():
+def test_prompt_heading_style_preserves_text_and_escapes_html():
     prompt = "开头\n\n【说话风格】\n <script>不要执行</script>\n\n结尾\n"
     fragment = prompt_html(prompt)
     assert 'class="prompt-heading"' in fragment
     assert "<script>" not in fragment
-    assert html.unescape(re.sub(r"<[^>]*>", "", fragment)) == prompt
+    assert (
+        '<span class="prompt-heading" data-prompt-heading>【说话风格】</span><br />'
+        in fragment
+    )
+    assert "&lt;script&gt;不要执行&lt;/script&gt;" in fragment
+    assert "<p>开头</p>" in fragment and "<p>结尾</p>" in fragment
 
 
 async def test_overview_escapes_capability_names(created):
@@ -966,16 +969,21 @@ async def test_real_browser_renders_long_offline_content(
                 for (const sheet of sheets) {
                     const viewport = sheet.querySelector('.flow-window').getBoundingClientRect();
                     for (const element of sheet.querySelectorAll('[data-text]')) {
-                        const range = document.createRange();
-                        range.selectNodeContents(element);
-                        for (const rect of range.getClientRects()) {
-                            if (rect.width > 0 && ((rect.top < viewport.top - .05 && rect.bottom > viewport.top + .05) || (rect.top < viewport.bottom - .05 && rect.bottom > viewport.bottom + .05))) broken++;
+                        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            if (!node.textContent.trim()) continue;
+                            const range = document.createRange();
+                            range.selectNodeContents(node);
+                            for (const rect of range.getClientRects()) {
+                                if (rect.width > 0 && ((rect.top < viewport.top - .05 && rect.bottom > viewport.top + .05) || (rect.top < viewport.bottom - .05 && rect.bottom > viewport.bottom + .05))) broken++;
+                            }
                         }
                     }
                 }
                 return {
                     broken,
-                    prompt: sheets[0].querySelector('[data-text]').textContent,
+                    promptHeadings: sheets[0].querySelectorAll('[data-prompt-heading]').length,
                     pages: sheets.map(sheet => ({
                         hasHeader: Boolean(sheet.querySelector('.persona-header')),
                         hasTitle: Boolean(sheet.querySelector('h1')),
@@ -988,7 +996,8 @@ async def test_real_browser_renders_long_offline_content(
                 };
             }""")
             assert inspected["broken"] == 0
-            assert inspected["prompt"] == prompt
+            assert inspected["promptHeadings"] == 12
+            assert prompt in rendering.detail_markdown(response["data"])
             first_page = inspected["pages"][0]
             assert first_page["hasHeader"] and first_page["hasTitle"]
             assert not first_page["hasMetadata"]

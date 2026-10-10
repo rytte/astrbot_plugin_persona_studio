@@ -30,38 +30,49 @@ async ({height, maxPages}) => {
     source.classList.remove('continuation');
     const bounds = flow.getBoundingClientRect();
     if (firstCapacity <= 0 || continuationCapacity <= 0) return {error: '页面标题与边距超过分页高度，请增加分页高度。'};
-    const protectedRanges = [];
+    const textLines = [];
+    const textRects = element => {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        const rects = [];
+        let node;
+        while ((node = walker.nextNode())) {
+            if (!node.textContent.trim()) continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            for (const rect of range.getClientRects()) {
+                if (rect.width > 0 && rect.height > 0) rects.push(rect);
+            }
+        }
+        return rects;
+    };
     for (const element of flow.querySelectorAll('[data-text]')) {
-        const range = document.createRange();
-        range.selectNodeContents(element);
-        for (const rect of range.getClientRects()) {
-            if (rect.height > 0) protectedRanges.push({top: rect.top - bounds.top, bottom: rect.bottom - bounds.top, width: rect.width});
+        for (const rect of textRects(element)) {
+            textLines.push({top: rect.top - bounds.top, bottom: rect.bottom - bounds.top});
         }
     }
-    for (const heading of flow.querySelectorAll('[data-heading]')) {
+    textLines.sort((first, second) => first.top - second.top);
+    const blockRanges = [];
+    for (const heading of flow.querySelectorAll('[data-heading], [data-prompt-heading], .prose :is(h1,h2,h3,h4,h5,h6)')) {
         const title = heading.getBoundingClientRect();
-        const text = heading.parentElement.querySelector('[data-text]');
-        const range = document.createRange();
-        if (text) range.selectNodeContents(text);
-        const firstLine = text ? range.getClientRects()[0] : null;
-        protectedRanges.push({top: title.top - bounds.top, bottom: Math.max(title.bottom, firstLine ? firstLine.bottom : title.bottom) - bounds.top});
+        const following = textLines.find(rect => rect.top >= title.bottom - bounds.top - 1);
+        blockRanges.push({top: title.top - bounds.top, bottom: Math.max(title.bottom - bounds.top, following ? following.bottom : 0)});
     }
-    for (const heading of flow.querySelectorAll('[data-prompt-heading]')) {
-        const title = heading.getBoundingClientRect();
-        const following = protectedRanges.filter(rect => rect.width > 0 && rect.top >= title.bottom - bounds.top - 1).sort((first, second) => first.top - second.top)[0];
-        protectedRanges.push({top: title.top - bounds.top, bottom: Math.max(title.bottom - bounds.top, following ? following.bottom : 0)});
+    for (const element of flow.querySelectorAll('.prose tr, .prose pre')) {
+        const rect = element.getBoundingClientRect();
+        blockRanges.push({top: rect.top - bounds.top, bottom: rect.bottom - bounds.top});
     }
     const spans = [];
     const totalHeight = Math.ceil(bounds.height);
     let start = 0;
     while (start < totalHeight) {
         const capacity = spans.length === 0 ? firstCapacity : continuationCapacity;
+        const protectedRanges = textLines.concat(blockRanges.filter(rect => rect.bottom - rect.top <= capacity));
         let end = Math.min(start + capacity, totalHeight);
         if (end < totalHeight) {
             while (true) {
                 const crossing = protectedRanges.filter(rect => rect.top < end && rect.bottom > end);
                 if (!crossing.length) break;
-                end = Math.floor(Math.min(...crossing.map(rect => rect.top)));
+                end = Math.min(...crossing.map(rect => rect.top));
                 if (end <= start) return {error: '页面空间不足以完整显示文字行，请增加分页高度。'};
             }
         }
