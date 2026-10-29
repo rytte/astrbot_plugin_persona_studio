@@ -3,13 +3,13 @@
     "description": "允许在群聊中使用",
     "type": "bool",
     "default": true,
-    "hint": "开启后，模型工具与 /ps 命令可在群聊中使用，权限规则与私聊一致。详情直接发送到群里，switch 仅修改 AstrBot 分配的当前会话的人格绑定。"
+    "hint": "开启后，模型工具与 /ps 命令可在群聊中使用，权限规则与私聊一致。"
   },
   "whitelist": {
     "description": "人格管理白名单",
     "type": "template_list",
     "default": [],
-    "hint": "用户只能管理自己通过本插件新建的人格。管理员可在私聊或已开放的群聊使用 /ps whitelist add/remove <用户ID> 维护当前平台实例的白名单。移出白名单立即撤销权限，管理员不需要加入。",
+    "hint": "管理员以外的用户使用需要填写用户ID。用户只能管理自己通过本插件新建的人格。管理员可在私聊或已开放的群聊使用 /ps whitelist add/remove <用户ID> 维护当前平台实例的白名单。",
     "templates": {
       "user": {
         "name": "授权用户",
@@ -31,12 +31,12 @@
   "max_personas_per_user": {
     "description": "白名单用户人格数量上限",
     "type": "int",
-    "default": 20
+    "default": 10
   },
   "max_personas_total": {
     "description": "全局人格数量上限（包含 WebUI 创建）",
     "type": "int",
-    "default": 200
+    "default": 100
   },
   "max_prompt_chars": {
     "description": "系统提示词字符上限",
